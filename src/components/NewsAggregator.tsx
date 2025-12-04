@@ -85,6 +85,43 @@ const ScrapeButton = styled.button<{ $bgColor?: string }>`
   }
 `;
 
+const SourceCheckboxContainer = styled.div`
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 12px;
+  background-color: #fff;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+`;
+
+const SourceCheckboxLabel = styled.label`
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  color: #374151;
+  user-select: none;
+
+  &:hover {
+    color: #2563eb;
+  }
+`;
+
+const SourceCheckbox = styled.input`
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+  accent-color: #2563eb;
+`;
+
+const SourceCheckboxText = styled.span`
+  font-weight: 500;
+`;
+
 const Button = styled.button<{ $active?: boolean }>`
   padding: 8px 16px;
   margin: 0 8px;
@@ -401,9 +438,9 @@ const getBackendUrl = () => {
 const fetchNews = async ({
   queryKey,
 }: {
-  queryKey: [string, ViewMode, string, string, number, TimeFilterType, SourceFilterType, boolean, string[], boolean];
+  queryKey: [string, ViewMode, string, string, number, TimeFilterType, SourceFilterType, boolean, string[], boolean, string[]];
 }) => {
-  const [, viewMode, category, searchTerm, currentPage, timeFilter, sourceFilter, useEnriched, holdings, shouldScrape] = queryKey;
+  const [, viewMode, category, searchTerm, currentPage, timeFilter, sourceFilter, useEnriched, holdings, shouldScrape, selectedSources] = queryKey;
   const BACKEND_URL = getBackendUrl();
 
   // If viewing feed, use feed endpoint
@@ -434,12 +471,17 @@ const fetchNews = async ({
     const holdingsToUse = (holdings && Array.isArray(holdings) && holdings.length > 0) ? holdings : [];
     
     try {
+      // Use selectedSources for scraping, sourceFilter.sources for filtering displayed results
+      const sourcesToUse = shouldScrape && selectedSources && selectedSources.length > 0 
+        ? selectedSources 
+        : (sourceFilter.sources && sourceFilter.sources.length > 0 ? sourceFilter.sources : undefined);
+
       const response = await axios.post(`${BACKEND_URL}/api/news/holdings/enriched`, {
         holdings: holdingsToUse, // Empty array to fetch all articles, or holdings array if available
         page: currentPage,
         from: timeFilter.fromDate || undefined,
         to: timeFilter.toDate || undefined,
-        sources: sourceFilter.sources && sourceFilter.sources.length > 0 ? sourceFilter.sources : undefined,
+        sources: sourcesToUse,
         scrape: shouldScrape,
       });
       console.log(`[fetchNews] Received ${response.data.articles?.length || 0} articles from enriched endpoint, scrape was: ${shouldScrape}`);
@@ -523,6 +565,10 @@ const NewsAggregator: React.FC = () => {
   });
 
   const [shouldScrape, setShouldScrape] = useState<boolean>(false);
+  const [selectedSources, setSelectedSources] = useState<string[]>(() => {
+    const saved = localStorage.getItem("wealthyRabbitSelectedSources");
+    return saved ? JSON.parse(saved) : ['newsapi', 'gnews', 'googlerss']; // Default: all sources
+  });
   const [triageLoading, setTriageLoading] = useState<boolean>(false);
   const [enrichLoading, setEnrichLoading] = useState<boolean>(false);
   const [clearLoading, setClearLoading] = useState<boolean>(false);
@@ -572,7 +618,7 @@ const NewsAggregator: React.FC = () => {
     error,
     refetch,
   } = useQuery({
-    queryKey: ["news", viewMode, category, searchTerm, currentPage, timeFilter, sourceFilter, useEnriched, holdingsTickers, shouldScrape],
+    queryKey: ["news", viewMode, category, searchTerm, currentPage, timeFilter, sourceFilter, useEnriched, holdingsTickers, shouldScrape, selectedSources],
     queryFn: fetchNews,
     staleTime: shouldScrape ? 0 : 5 * 60 * 1000, // Force fresh data when scraping
     refetchOnWindowFocus: false,
@@ -816,43 +862,96 @@ const NewsAggregator: React.FC = () => {
         </>
       )}
       {viewMode === "all" && (
-        <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "16px", flexWrap: "wrap" }}>
-          <ScrapeButton
-            onClick={async () => {
-              console.log("[ScrapeButton] Clicked - directly calling API with scrape=true");
-              
-              try {
-                const BACKEND_URL = getBackendUrl();
-                let response;
+        <>
+          <SourceCheckboxContainer>
+            <span style={{ fontWeight: 600, color: "#374151", marginRight: "8px" }}>Scrape from:</span>
+            <SourceCheckboxLabel>
+              <SourceCheckbox
+                type="checkbox"
+                checked={selectedSources.includes('newsapi')}
+                onChange={(e) => {
+                  const newSources = e.target.checked
+                    ? [...selectedSources, 'newsapi']
+                    : selectedSources.filter(s => s !== 'newsapi');
+                  setSelectedSources(newSources);
+                  localStorage.setItem("wealthyRabbitSelectedSources", JSON.stringify(newSources));
+                }}
+              />
+              <SourceCheckboxText>NewsAPI</SourceCheckboxText>
+            </SourceCheckboxLabel>
+            <SourceCheckboxLabel>
+              <SourceCheckbox
+                type="checkbox"
+                checked={selectedSources.includes('gnews')}
+                onChange={(e) => {
+                  const newSources = e.target.checked
+                    ? [...selectedSources, 'gnews']
+                    : selectedSources.filter(s => s !== 'gnews');
+                  setSelectedSources(newSources);
+                  localStorage.setItem("wealthyRabbitSelectedSources", JSON.stringify(newSources));
+                }}
+              />
+              <SourceCheckboxText>GNews</SourceCheckboxText>
+            </SourceCheckboxLabel>
+            <SourceCheckboxLabel>
+              <SourceCheckbox
+                type="checkbox"
+                checked={selectedSources.includes('googlerss')}
+                onChange={(e) => {
+                  const newSources = e.target.checked
+                    ? [...selectedSources, 'googlerss']
+                    : selectedSources.filter(s => s !== 'googlerss');
+                  setSelectedSources(newSources);
+                  localStorage.setItem("wealthyRabbitSelectedSources", JSON.stringify(newSources));
+                }}
+              />
+              <SourceCheckboxText>Google RSS</SourceCheckboxText>
+            </SourceCheckboxLabel>
+          </SourceCheckboxContainer>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "16px", flexWrap: "wrap" }}>
+            <ScrapeButton
+              onClick={async () => {
+                console.log("[ScrapeButton] Clicked - directly calling API with scrape=true");
+                console.log("[ScrapeButton] Selected sources:", selectedSources);
                 
-                // If user has holdings, ALWAYS use enriched endpoint (even if toggle is off)
-                // This ensures holdings are taken into account when scraping
-                if (holdingsTickers.length > 0) {
-                  // Enriched news endpoint - uses holdings to search
-                  console.log(`[ScrapeButton] Scraping enriched news for holdings: ${holdingsTickers.join(', ')}`);
-                  response = await axios.post(`${BACKEND_URL}/api/news/holdings/enriched`, {
-                    holdings: holdingsTickers,
-                    page: currentPage,
-                    from: timeFilter.fromDate || undefined,
-                    to: timeFilter.toDate || undefined,
-                    sources: sourceFilter.sources && sourceFilter.sources.length > 0 ? sourceFilter.sources : undefined,
-                    scrape: true, // Force scrape
-                  });
-                } else {
-                  // Regular news endpoint - only if no holdings
-                  console.log(`[ScrapeButton] Scraping regular news for category: ${category} (no holdings)`);
-                  const params = new URLSearchParams();
-                  params.append("category", category);
-                  params.append("page", currentPage.toString());
-                  params.append("scrape", "true");
-                  if (timeFilter.fromDate) params.append("from", timeFilter.fromDate);
-                  if (timeFilter.toDate) params.append("to", timeFilter.toDate);
-                  if (sourceFilter.sources && sourceFilter.sources.length > 0) {
-                    params.append("sources", sourceFilter.sources.join(','));
-                  }
-                  
-                  response = await axios.get(`${BACKEND_URL}/api/news?${params.toString()}`);
+                // Ensure at least one source is selected
+                if (selectedSources.length === 0) {
+                  alert("Please select at least one source to scrape from.");
+                  return;
                 }
+                
+                try {
+                  const BACKEND_URL = getBackendUrl();
+                  let response;
+                  
+                  // If user has holdings, ALWAYS use enriched endpoint (even if toggle is off)
+                  // This ensures holdings are taken into account when scraping
+                  if (holdingsTickers.length > 0) {
+                    // Enriched news endpoint - uses holdings to search
+                    console.log(`[ScrapeButton] Scraping enriched news for holdings: ${holdingsTickers.join(', ')}`);
+                    response = await axios.post(`${BACKEND_URL}/api/news/holdings/enriched`, {
+                      holdings: holdingsTickers,
+                      page: currentPage,
+                      from: timeFilter.fromDate || undefined,
+                      to: timeFilter.toDate || undefined,
+                      sources: selectedSources.length > 0 ? selectedSources : undefined,
+                      scrape: true, // Force scrape
+                    });
+                  } else {
+                    // Regular news endpoint - only if no holdings
+                    console.log(`[ScrapeButton] Scraping regular news for category: ${category} (no holdings)`);
+                    const params = new URLSearchParams();
+                    params.append("category", category);
+                    params.append("page", currentPage.toString());
+                    params.append("scrape", "true");
+                    if (timeFilter.fromDate) params.append("from", timeFilter.fromDate);
+                    if (timeFilter.toDate) params.append("to", timeFilter.toDate);
+                    if (selectedSources.length > 0) {
+                      params.append("sources", selectedSources.join(','));
+                    }
+                    
+                    response = await axios.get(`${BACKEND_URL}/api/news?${params.toString()}`);
+                  }
                 
                 console.log(`[ScrapeButton] Direct API call successful, received ${response.data.articles?.length || 0} articles`);
                 console.log(`[ScrapeButton] Response cached flag: ${response.data.cached}, articles sample:`, response.data.articles?.slice(0, 3).map((a: any) => ({ title: a.title?.substring(0, 50), url: a.url })));
@@ -893,6 +992,7 @@ const NewsAggregator: React.FC = () => {
             </span>
           )}
         </div>
+        </>
       )}
       {holdings.length > 0 && useEnriched && (
         <>

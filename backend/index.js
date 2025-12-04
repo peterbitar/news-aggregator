@@ -41,7 +41,10 @@ app.get("/api/news", async (req, res) => {
     // Parse sources parameter (comma-separated: "newsapi,gnews" or single: "newsapi")
     let sourceArray = null;
     if (sources) {
-      sourceArray = sources.split(',').map(s => s.trim().toLowerCase()).filter(s => s);
+      sourceArray = String(sources).split(',').map(s => s.trim().toLowerCase()).filter(s => s);
+      console.log(`[Regular News] Parsed sources array:`, sourceArray);
+    } else {
+      console.log(`[Regular News] No sources parameter provided - will fetch from all sources`);
     }
 
     // If scrape=false or not provided, return cached articles from database
@@ -366,12 +369,23 @@ app.post("/api/news/holdings/enriched", async (req, res) => {
     // Standardize scrape parameter: accept boolean, "true", or "1"
     const shouldScrape = scrape === true || scrape === "true" || scrape === "1";
     
+    console.log(`[Enriched News] Received request - sources:`, sources, `Type:`, typeof sources, `IsArray:`, Array.isArray(sources));
+    
     // Parse sources parameter
     let sourceArray = null;
     if (sources) {
-      sourceArray = Array.isArray(sources) 
-        ? sources 
-        : sources.split(',').map(s => s.trim().toLowerCase()).filter(s => s);
+      if (Array.isArray(sources)) {
+        sourceArray = sources.map(s => String(s).toLowerCase().trim()).filter(s => s);
+      } else if (typeof sources === 'string') {
+        sourceArray = sources.split(',').map(s => s.trim().toLowerCase()).filter(s => s);
+      }
+      // Only set sourceArray if it has valid values
+      if (sourceArray && sourceArray.length === 0) {
+        sourceArray = null;
+      }
+      console.log(`[Enriched News] Parsed sources array:`, sourceArray);
+    } else {
+      console.log(`[Enriched News] No sources parameter provided - will fetch from all sources`);
     }
 
     // If no holdings provided, fetch all articles from database

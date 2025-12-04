@@ -1,5 +1,8 @@
 const axios = require("axios");
 const { saveArticles, getExistingArticleUrls } = require("./articleStorage");
+const xml2js = require("xml2js");
+const { promisify } = require("util");
+const parseXML = promisify(xml2js.parseString);
 
 /**
  * Transform GNews article to standard Article format
@@ -39,6 +42,338 @@ function transformNewsAPIArticle(newsapiArticle) {
     content: newsapiArticle.content || null,
     feedSource: "newsapi", // Tag articles from NewsAPI
   };
+}
+
+/**
+ * Transform Google RSS article to standard Article format
+ * Handles various RSS XML structures from Google News
+ */
+function transformGoogleRSSArticle(rssItem) {
+  // Extract title - handle both array and string formats
+  const title = Array.isArray(rssItem.title) 
+    ? (rssItem.title[0]?._ || rssItem.title[0] || "") 
+    : (rssItem.title || "");
+  
+  // Extract link - handle both array and string formats
+  const link = Array.isArray(rssItem.link) 
+    ? (rssItem.link[0]?._ || rssItem.link[0] || rssItem.link[0]?.$?.href || "") 
+    : (rssItem.link || "");
+  
+  // Extract description - handle both array and string formats
+  let description = null;
+  if (rssItem.description) {
+    description = Array.isArray(rssItem.description)
+      ? (rssItem.description[0]?._ || rssItem.description[0] || "")
+      : rssItem.description;
+  }
+  
+  // Extract published date - handle various formats
+  let pubDate = new Date().toISOString();
+  if (rssItem.pubDate) {
+    const dateStr = Array.isArray(rssItem.pubDate) 
+      ? (rssItem.pubDate[0]?._ || rssItem.pubDate[0] || "")
+      : rssItem.pubDate;
+    
+    if (dateStr) {
+      try {
+        const parsedDate = new Date(dateStr);
+        if (!isNaN(parsedDate.getTime())) {
+          pubDate = parsedDate.toISOString();
+        }
+      } catch (e) {
+        // Keep default date if parsing fails
+      }
+    }
+  }
+  
+  // Extract source name - try multiple methods
+  let sourceName = "Google News";
+  
+  // Method 1: Check source tag
+  if (rssItem.source) {
+    const source = Array.isArray(rssItem.source) ? rssItem.source[0] : rssItem.source;
+    if (source?._) {
+      sourceName = source._;
+    } else if (typeof source === 'string') {
+      sourceName = source;
+    } else if (source?.$?.url) {
+      // Extract domain from source URL
+      try {
+        const url = new URL(source.$.url);
+        sourceName = url.hostname.replace('www.', '');
+      } catch (e) {
+        // Keep default
+      }
+    }
+  }
+  
+  // Method 2: Check dc:creator
+  if (sourceName === "Google News" && rssItem["dc:creator"]) {
+    const creator = Array.isArray(rssItem["dc:creator"]) 
+      ? rssItem["dc:creator"][0] 
+      : rssItem["dc:creator"];
+    if (creator?._) {
+      sourceName = creator._;
+    } else if (typeof creator === 'string') {
+      sourceName = creator;
+    }
+  }
+  
+  // Method 3: Try to extract from description (often contains source info)
+  if (sourceName === "Google News" && description) {
+    // Look for patterns like "Source: ..." or "via ..." or "from ..."
+    const sourceMatch = description.match(/(?:Source|via|from|by):\s*([^<\.]+)/i);
+    if (sourceMatch && sourceMatch[1]) {
+      sourceName = sourceMatch[1].trim();
+    }
+  }
+  
+  // Extract image URL if available (Google RSS sometimes includes it in description)
+  let imageUrl = null;
+  if (description) {
+    const imgMatch = description.match(/<img[^>]+src=["']([^"']+)["']/i);
+    if (imgMatch && imgMatch[1]) {
+      imageUrl = imgMatch[1];
+    }
+  }
+  
+  // Clean description of HTML tags for better storage
+  let cleanDescription = description;
+  if (description) {
+    cleanDescription = description
+      .replace(/<[^>]+>/g, '') // Remove HTML tags
+      .replace(/&nbsp;/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .trim();
+  }
+
+  return {
+    source: {
+      id: null,
+      name: sourceName,
+    },
+    author: null,
+    title: title.trim(),
+    description: cleanDescription || null,
+    url: link.trim(),
+    urlToImage: imageUrl || null,
+    publishedAt: pubDate,
+    content: cleanDescription || null, // Use cleaned description as content
+    feedSource: "googlerss", // Tag articles from Google RSS
+  };
+}
+
+/**
+ * Decode Google RSS URL to get actual article URL
+ * 
+ * DOCUMENTATION: Google RSS feeds return encoded URLs that need to be decoded.
+ * The following Python code shows how to decode them (NOT YET IMPLEMENTED):
+ * 
+ * ```python
+ * import requests
+ * import json
+ * from bs4 import BeautifulSoup
+ * 
+ * google_rss_url = 'https://news.google.com/rss/articles/CBMiWkFVX3lxTE1qZ1V2bUVCeXlNbElxeFI2WWVLeVVUM3pBaGhmWHlpWThlZ2…'
+ * 
+ * resp = requests.get(google_rss_url)
+ * data = BeautifulSoup(resp.text, 'html.parser').select_one('c-wiz[data-p]').get('data-p')
+ * obj = json.loads(data.replace('%.@.', '["garturlreq",'))
+ * 
+ * payload = {
+ *     'f.req': json.dumps([[['Fbv4je', json.dumps(obj[:-6] + obj[-2:]), 'null', 'generic']]])
+ * }
+ * 
+ * headers = {
+ *   'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
+ *   'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+ * }
+ * 
+ * url = "https://news.google.com/_/DotsSplashUi/data/batchexecute"
+ * response = requests.post(url, headers=headers, data=payload)
+ * array_string = json.loads(response.text.replace(")]}'", ""))[0][2]
+ * article_url = json.loads(array_string)[1]
+ * 
+ * print(article_url)
+ * ```
+ * 
+ * TODO: Implement this decoding logic in JavaScript/Node.js
+ * For now, we use the RSS link directly (which may be a Google redirect URL)
+ * 
+ * @param {string} googleRssUrl - The encoded Google RSS URL
+ * @returns {Promise<string>} - The decoded article URL (currently returns input URL)
+ */
+async function decodeGoogleRSSUrl(googleRssUrl) {
+  // TODO: Implement URL decoding logic
+  // For now, return the URL as-is
+  return googleRssUrl;
+}
+
+/**
+ * Fetch news from Google RSS
+ * Fetches articles from Google News RSS feeds and maps them to the database format.
+ * 
+ * Database mapping:
+ * - url: Google RSS link (encoded URL, decoding not yet implemented)
+ * - source_name: Extracted from RSS source tag, dc:creator, or description
+ * - title: From RSS title
+ * - description: Cleaned HTML from RSS description
+ * - published_at: Parsed from RSS pubDate
+ * - feed_source: Set to "googlerss" for tracking
+ * - content: Uses cleaned description as content
+ * 
+ * @param {string} query - Search query or topic (e.g., "NVDA", "Nvidia stock")
+ * @param {object} options - Options including maxArticles, from, to
+ * @param {number} options.maxArticles - Maximum articles to fetch (default: 10)
+ * @param {string} options.from - Start date filter (not yet implemented)
+ * @param {string} options.to - End date filter (not yet implemented)
+ * @returns {Promise<Array>} Array of article objects in standard format
+ */
+async function fetchFromGoogleRSS(query, options = {}) {
+  const { maxArticles = 10, from, to } = options;
+  
+  console.log(`[Google RSS] Fetching articles - query: "${query}", max: ${maxArticles}`);
+
+  try {
+    // Build Google RSS URL
+    // Google News RSS format: https://news.google.com/rss/search?q={query}&hl=en&gl=US&ceid=US:en
+    let rssUrl = `https://news.google.com/rss/search?q=${encodeURIComponent(query)}&hl=en&gl=US&ceid=US:en`;
+    
+    // Add date filters if provided (Google RSS uses when:1d, 7d, etc.)
+    // For now, we'll use the basic query format
+    if (from || to) {
+      // TODO: Implement date filtering for Google RSS
+      console.log(`[Google RSS] Date filtering not yet implemented for RSS feeds`);
+    }
+
+    console.log(`[Google RSS] Making RSS request to: ${rssUrl}`);
+    const response = await axios.get(rssUrl, {
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+        'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+      },
+    });
+
+    // Check if response is valid
+    if (!response.data) {
+      console.error(`[Google RSS] Empty response from RSS feed`);
+      return [];
+    }
+
+    console.log(`[Google RSS] Received response, length: ${response.data.length} chars`);
+    console.log(`[Google RSS] Response preview (first 300 chars): ${response.data.substring(0, 300)}`);
+
+    // Parse XML RSS feed with proper options
+    let parsed;
+    try {
+      parsed = await parseXML(response.data, {
+        explicitArray: true, // Always return arrays
+        mergeAttrs: false, // Keep attributes separate
+        explicitRoot: true, // Include root element to see structure
+        ignoreAttrs: false, // Include attributes
+        trim: true, // Trim whitespace
+        normalize: true, // Normalize whitespace
+        normalizeTags: false, // Don't lowercase tags
+      });
+    } catch (parseError) {
+      console.error(`[Google RSS] XML parsing error:`, parseError.message);
+      console.error(`[Google RSS] Response data sample:`, response.data.substring(0, 500));
+      return [];
+    }
+    
+    // Debug: Log parsed structure
+    console.log(`[Google RSS] Parsed XML root keys:`, Object.keys(parsed || {}));
+    
+    if (!parsed) {
+      console.error(`[Google RSS] Parsed result is null or undefined`);
+      return [];
+    }
+    
+    // Handle different RSS structures
+    let channel = null;
+    let items = [];
+    
+    // Try standard RSS structure: rss.channel
+    if (parsed.rss) {
+      console.log(`[Google RSS] Found RSS root element`);
+      if (parsed.rss.channel) {
+        channel = Array.isArray(parsed.rss.channel) ? parsed.rss.channel[0] : parsed.rss.channel;
+        console.log(`[Google RSS] Found RSS channel structure`);
+      } else {
+        console.error(`[Google RSS] RSS element found but no channel. RSS keys:`, Object.keys(parsed.rss));
+      }
+    }
+    // Try alternative structure: feed (Atom format)
+    else if (parsed.feed) {
+      channel = Array.isArray(parsed.feed) ? parsed.feed[0] : parsed.feed;
+      console.log(`[Google RSS] Found Atom feed structure`);
+    }
+    // Try direct channel
+    else if (parsed.channel) {
+      channel = Array.isArray(parsed.channel) ? parsed.channel[0] : parsed.channel;
+      console.log(`[Google RSS] Found direct channel structure`);
+    }
+    
+    if (!channel) {
+      console.error(`[Google RSS] Invalid RSS feed structure - no channel found`);
+      console.error(`[Google RSS] Available keys in parsed object:`, Object.keys(parsed));
+      if (parsed.rss) {
+        console.error(`[Google RSS] RSS object keys:`, Object.keys(parsed.rss));
+      }
+      return [];
+    }
+    
+    // Extract items - handle both RSS and Atom formats
+    if (channel.item) {
+      items = Array.isArray(channel.item) ? channel.item : [channel.item];
+    } else if (channel.entry) {
+      // Atom format uses 'entry' instead of 'item'
+      items = Array.isArray(channel.entry) ? channel.entry : [channel.entry];
+      console.log(`[Google RSS] Using Atom format entries`);
+    }
+    
+    if (!items || items.length === 0) {
+      console.log(`[Google RSS] No items in RSS feed`);
+      return [];
+    }
+
+    console.log(`[Google RSS] RSS feed returned ${items.length} items`);
+
+    // Transform RSS items to standard article format
+    // Limit to maxArticles (default: 10) to match other sources
+    const articles = [];
+    const itemsToProcess = items.slice(0, maxArticles);
+    console.log(`[Google RSS] Processing ${itemsToProcess.length} items (limited from ${items.length})`);
+    
+    for (const item of itemsToProcess) {
+      try {
+        const article = transformGoogleRSSArticle(item);
+        
+        // Validate article before adding
+        if (article.url && article.title) {
+          // TODO: Decode Google RSS URL to get actual article URL
+          // For now, we use the RSS link directly
+          // article.url = await decodeGoogleRSSUrl(article.url);
+          
+          articles.push(article);
+        } else {
+          console.warn(`[Google RSS] Skipping invalid article: missing url or title`);
+        }
+      } catch (error) {
+        console.error(`[Google RSS] Error transforming article:`, error.message);
+      }
+    }
+
+    console.log(`[Google RSS] Successfully transformed ${articles.length} articles`);
+    return articles;
+  } catch (error) {
+    console.error("Error fetching from Google RSS:", error.response?.data || error.message);
+    return [];
+  }
 }
 
 /**
@@ -270,28 +605,75 @@ function sortArticlesByDate(articles) {
 async function fetchNewsFromMultipleSources(query, options = {}) {
   const { category, page, from, to, sortBy, sources, searchedBy } = options;
 
+  console.log(`[fetchNewsFromMultipleSources] Sources parameter:`, sources, `Type:`, typeof sources, `IsArray:`, Array.isArray(sources), `Stringified:`, JSON.stringify(sources));
+
   // Determine which sources to fetch from
-  const fetchGNews = !sources || sources.includes('gnews');
-  const fetchNewsAPI = !sources || sources.includes('newsapi');
+  // If sources is provided (array with length > 0), only fetch from those sources
+  // If sources is null/undefined/empty array, fetch from all sources
+  const hasSources = sources && Array.isArray(sources) && sources.length > 0;
+  
+  // Normalize sources array to lowercase strings for comparison
+  // Handle both array and string inputs
+  let normalizedSources = [];
+  if (hasSources) {
+    normalizedSources = sources.map(s => String(s).toLowerCase().trim()).filter(s => s);
+    console.log(`[fetchNewsFromMultipleSources] Normalized from array:`, normalizedSources);
+  } else if (sources && typeof sources === 'string') {
+    // Handle string input (comma-separated)
+    normalizedSources = sources.split(',').map(s => s.trim().toLowerCase()).filter(s => s);
+    console.log(`[fetchNewsFromMultipleSources] Normalized from string:`, normalizedSources);
+  } else {
+    console.log(`[fetchNewsFromMultipleSources] No valid sources provided, will fetch from all sources`);
+  }
+  
+  const hasNormalizedSources = normalizedSources.length > 0;
+  
+  // Only fetch from sources that are explicitly included in the sources array
+  // If hasNormalizedSources is false (null/undefined/empty), fetch from all sources
+  const fetchGNews = !hasNormalizedSources || normalizedSources.includes('gnews');
+  const fetchNewsAPI = !hasNormalizedSources || normalizedSources.includes('newsapi');
+  const fetchGoogleRSS = !hasNormalizedSources || normalizedSources.includes('googlerss');
+  
+  console.log(`[fetchNewsFromMultipleSources] Source flags - hasSources: ${hasSources}, hasNormalizedSources: ${hasNormalizedSources}, normalizedSources: ${JSON.stringify(normalizedSources)}, GNews: ${fetchGNews}, NewsAPI: ${fetchNewsAPI}, GoogleRSS: ${fetchGoogleRSS}`);
+  
+  // CRITICAL: Verify the logic is working correctly
+  if (hasNormalizedSources) {
+    console.log(`[fetchNewsFromMultipleSources] ⚠️ SOURCES FILTERING ACTIVE - Only fetching from: ${normalizedSources.join(', ')}`);
+  } else {
+    console.log(`[fetchNewsFromMultipleSources] ⚠️ NO SOURCES FILTER - Fetching from ALL sources (GNews, NewsAPI, GoogleRSS)`);
+  }
 
   // Fetch from enabled sources in parallel
   const fetchPromises = [];
   
   if (fetchGNews) {
+    console.log(`[fetchNewsFromMultipleSources] ✅ Fetching from GNews...`);
     fetchPromises.push(fetchFromGNews(query, { category, page, from, to }));
   } else {
+    console.log(`[fetchNewsFromMultipleSources] ❌ Skipping GNews (not in sources: ${JSON.stringify(normalizedSources)})`);
     fetchPromises.push(Promise.resolve([]));
   }
   
   if (fetchNewsAPI) {
+    console.log(`[fetchNewsFromMultipleSources] ✅ Fetching from NewsAPI...`);
     fetchPromises.push(fetchFromNewsAPI(query, { category, page, from, to, sortBy }));
   } else {
+    console.log(`[fetchNewsFromMultipleSources] ❌ Skipping NewsAPI (not in sources: ${JSON.stringify(normalizedSources)})`);
     fetchPromises.push(Promise.resolve([]));
   }
 
-  const [gnewsArticles, newsapiArticles] = await Promise.all(fetchPromises);
+  if (fetchGoogleRSS) {
+    console.log(`[fetchNewsFromMultipleSources] ✅ Fetching from Google RSS...`);
+    // Limit Google RSS to 10 articles to match other sources
+    fetchPromises.push(fetchFromGoogleRSS(query, { maxArticles: 10, from, to }));
+  } else {
+    console.log(`[fetchNewsFromMultipleSources] ❌ Skipping Google RSS (not in sources: ${JSON.stringify(normalizedSources)})`);
+    fetchPromises.push(Promise.resolve([]));
+  }
+
+  const [gnewsArticles, newsapiArticles, googleRSSArticles] = await Promise.all(fetchPromises);
   
-  console.log(`[fetchNewsFromMultipleSources] Received ${gnewsArticles.length} articles from GNews, ${newsapiArticles.length} from NewsAPI`);
+  console.log(`[fetchNewsFromMultipleSources] Received ${gnewsArticles.length} articles from GNews, ${newsapiArticles.length} from NewsAPI, ${googleRSSArticles.length} from Google RSS`);
 
   // Tag articles with their source before merging
   const taggedGNewsArticles = gnewsArticles.map(article => ({
@@ -304,8 +686,13 @@ async function fetchNewsFromMultipleSources(query, options = {}) {
     feedSource: article.feedSource || "newsapi",
   }));
 
+  const taggedGoogleRSSArticles = googleRSSArticles.map(article => ({
+    ...article,
+    feedSource: article.feedSource || "googlerss",
+  }));
+
   // Merge articles from all sources
-  const allArticles = [...taggedGNewsArticles, ...taggedNewsAPIArticles];
+  const allArticles = [...taggedGNewsArticles, ...taggedNewsAPIArticles, ...taggedGoogleRSSArticles];
   
   // Deduplicate articles BEFORE saving (in case same article came from multiple sources)
   // This prevents saving duplicate articles to database
@@ -373,19 +760,25 @@ async function fetchArticlesForHoldings(holdings, options = {}) {
   // Fetch news for all holdings in parallel
   // Tag each article with the ticker that found it
   console.log(`[fetchArticlesForHoldings] Processing ${holdings.length} holdings with queries:`, searchQueries);
+  console.log(`[fetchArticlesForHoldings] Sources parameter:`, sources, `Type:`, typeof sources, `IsArray:`, Array.isArray(sources), `Stringified:`, JSON.stringify(sources));
+  
+  // Ensure sources is passed correctly - if it's null/undefined, pass null explicitly
+  const sourcesToPass = (sources && Array.isArray(sources) && sources.length > 0) ? sources : 
+                        (sources && typeof sources === 'string' && sources.trim()) ? sources : null;
+  console.log(`[fetchArticlesForHoldings] Sources to pass:`, sourcesToPass, `Type:`, typeof sourcesToPass);
   
   const fetchPromises = holdings.map((holding, index) => {
     const query = searchQueries[index];
     // Handle both object format {ticker, label} and string format "NVDA"
     const ticker = typeof holding === 'object' ? holding.ticker.toUpperCase() : holding.toUpperCase();
     
-    console.log(`[fetchArticlesForHoldings] Fetching for ticker: ${ticker}, query: "${query}"`);
+    console.log(`[fetchArticlesForHoldings] Fetching for ticker: ${ticker}, query: "${query}", sources:`, sourcesToPass);
     
     return fetchNewsFromMultipleSources(query, {
       page,
       from,
       to,
-      sources,
+      sources: sourcesToPass,
       sortBy: "publishedAt",
       searchedBy: ticker, // Tag articles with the ticker that found them
     }).then(articles => {
@@ -414,10 +807,12 @@ async function fetchArticlesForHoldings(holdings, options = {}) {
 module.exports = {
   fetchFromGNews,
   fetchFromNewsAPI,
+  fetchFromGoogleRSS,
   fetchNewsFromMultipleSources,
   fetchArticlesForHoldings,
   deduplicateArticles,
   deduplicateArticlesWithSearchContext,
   sortArticlesByDate,
+  decodeGoogleRSSUrl, // Exported for future implementation
 };
 
