@@ -1009,59 +1009,60 @@ const NewsAggregator: React.FC = () => {
         </div>
         </>
       )}
+      {/* Always show Pipeline and Ranking buttons */}
+      <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "16px", flexWrap: "wrap", padding: "12px", backgroundColor: "#f0f9ff", borderRadius: "8px", boxShadow: "0 2px 4px rgba(0, 0, 0, 0.05)", border: "1px solid #bae6fd" }}>
+        <div style={{ width: "100%", marginBottom: "8px", fontSize: "0.875rem", fontWeight: "600", color: "#0369a1" }}>
+          🔄 Full Pipeline Processing (5 Stages)
+        </div>
+        <ScrapeButton
+          onClick={handlePipelineProcess}
+          disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
+          $bgColor="#8b5cf6"
+        >
+          {pipelineLoading ? "⏳ Processing..." : "🚀 Run Full Pipeline (Stages 1-4)"}
+        </ScrapeButton>
+        <ScrapeButton
+          onClick={handleRanking}
+          disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
+          $bgColor="#f59e0b"
+        >
+          {rankingLoading ? "⏳ Ranking..." : "📊 Stage 5: Ranking & Clustering"}
+        </ScrapeButton>
+        {stepMessage && (
+          <span style={{ color: stepMessage.includes("✅") ? "#10b981" : "#ef4444", fontSize: "0.875rem", marginLeft: "8px" }}>
+            {stepMessage}
+          </span>
+        )}
+        <div style={{ fontSize: "0.75rem", color: "#64748b", marginLeft: "8px", width: "100%" }}>
+          Pipeline processes: Title Triage → Content Fetch → Classification → Personalization → Ranking
+        </div>
+      </div>
+
+      {/* Show individual step buttons only when enriched mode is on and holdings exist */}
       {holdings.length > 0 && useEnriched && (
-        <>
-          <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "16px", flexWrap: "wrap", padding: "12px", backgroundColor: "#fff", borderRadius: "8px", boxShadow: "0 2px 4px rgba(0, 0, 0, 0.05)" }}>
-            <ScrapeButton
-              onClick={handleTriageStep}
-              disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
-              $bgColor="#10b981"
-            >
-              {triageLoading ? "⏳ Triaging..." : "🔍 Step 1: Triage Articles"}
-            </ScrapeButton>
-            <ScrapeButton
-              onClick={handleEnrichStep}
-              disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
-              $bgColor="#3b82f6"
-            >
-              {enrichLoading ? "⏳ Enriching..." : "✨ Step 2: Enrich Articles"}
-            </ScrapeButton>
-            <ScrapeButton
-              onClick={handleClearDatabase}
-              disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
-              $bgColor="#ef4444"
-            >
-              {clearLoading ? "⏳ Clearing..." : "🗑️ Clear Database"}
-            </ScrapeButton>
-            {stepMessage && (
-              <span style={{ color: stepMessage.includes("✅") ? "#10b981" : "#ef4444", fontSize: "0.875rem", marginLeft: "8px" }}>
-                {stepMessage}
-              </span>
-            )}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "16px", flexWrap: "wrap", padding: "12px", backgroundColor: "#f0f9ff", borderRadius: "8px", boxShadow: "0 2px 4px rgba(0, 0, 0, 0.05)", border: "1px solid #bae6fd" }}>
-            <div style={{ width: "100%", marginBottom: "8px", fontSize: "0.875rem", fontWeight: "600", color: "#0369a1" }}>
-              🔄 Full Pipeline Processing (5 Stages)
-            </div>
-            <ScrapeButton
-              onClick={handlePipelineProcess}
-              disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
-              $bgColor="#8b5cf6"
-            >
-              {pipelineLoading ? "⏳ Processing..." : "🚀 Run Full Pipeline (Stages 1-4)"}
-            </ScrapeButton>
-            <ScrapeButton
-              onClick={handleRanking}
-              disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
-              $bgColor="#f59e0b"
-            >
-              {rankingLoading ? "⏳ Ranking..." : "📊 Stage 5: Ranking & Clustering"}
-            </ScrapeButton>
-            <div style={{ fontSize: "0.75rem", color: "#64748b", marginLeft: "8px" }}>
-              Pipeline processes: Title Triage → Content Fetch → Classification → Personalization → Ranking
-            </div>
-          </div>
-        </>
+        <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "16px", flexWrap: "wrap", padding: "12px", backgroundColor: "#fff", borderRadius: "8px", boxShadow: "0 2px 4px rgba(0, 0, 0, 0.05)" }}>
+          <ScrapeButton
+            onClick={handleTriageStep}
+            disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
+            $bgColor="#10b981"
+          >
+            {triageLoading ? "⏳ Triaging..." : "🔍 Step 1: Triage Articles"}
+          </ScrapeButton>
+          <ScrapeButton
+            onClick={handleEnrichStep}
+            disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
+            $bgColor="#3b82f6"
+          >
+            {enrichLoading ? "⏳ Enriching..." : "✨ Step 2: Enrich Articles"}
+          </ScrapeButton>
+          <ScrapeButton
+            onClick={handleClearDatabase}
+            disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
+            $bgColor="#ef4444"
+          >
+            {clearLoading ? "⏳ Clearing..." : "🗑️ Clear Database"}
+          </ScrapeButton>
+        </div>
       )}
       {viewMode === "all" && (
         <ButtonGroup>
