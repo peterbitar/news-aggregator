@@ -5,6 +5,7 @@ import styled from "styled-components";
 import HoldingsPanel from "./HoldingsPanel";
 import TimeFilter, { TimeFilter as TimeFilterType } from "./TimeFilter";
 import SourceFilter, { SourceFilter as SourceFilterType } from "./SourceFilter";
+import ApiTestPage from "./ApiTestPage";
 import { Article, EnrichedArticle, Holding } from "../types";
 
 const Container = styled.div`
@@ -575,6 +576,7 @@ const NewsAggregator: React.FC = () => {
   const [pipelineLoading, setPipelineLoading] = useState<boolean>(false);
   const [rankingLoading, setRankingLoading] = useState<boolean>(false);
   const [stepMessage, setStepMessage] = useState<string>("");
+  const [showApiTestPage, setShowApiTestPage] = useState<boolean>(false);
 
   // Time filter state
   const [timeFilter, setTimeFilter] = useState<TimeFilterType>(() => {
@@ -813,9 +815,22 @@ const NewsAggregator: React.FC = () => {
     localStorage.setItem("newsPage", "1");
   };
 
+  if (showApiTestPage) {
+    return <ApiTestPage onBack={() => setShowApiTestPage(false)} />;
+  }
+
   return (
     <Container>
       <Title>🐰 Wealthy Rabbit</Title>
+      <div style={{ textAlign: "center", marginBottom: "16px" }}>
+        <ScrapeButton
+          onClick={() => setShowApiTestPage(true)}
+          $bgColor="#6366f1"
+          style={{ margin: "0 auto" }}
+        >
+          🧪 Test /api/articles Endpoint
+        </ScrapeButton>
+      </div>
       <HoldingsPanel />
       <TabContainer>
         <TabButton $active={viewMode === "all"} onClick={() => handleViewModeChange("all")}>
