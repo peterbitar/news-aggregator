@@ -368,7 +368,7 @@ app.post("/api/news/holdings/enriched", async (req, res) => {
     const { holdings: holdingsArray, page, from, to, sources, scrape } = req.body;
     // Standardize scrape parameter: accept boolean, "true", or "1"
     const shouldScrape = scrape === true || scrape === "true" || scrape === "1";
-    
+
     console.log(`[Enriched News] Received request - sources:`, sources, `Type:`, typeof sources, `IsArray:`, Array.isArray(sources));
     
     // Parse sources parameter
@@ -434,9 +434,9 @@ app.post("/api/news/holdings/enriched", async (req, res) => {
         });
       } else {
         // Can't scrape without holdings (need to know what to search for)
-        return res.status(400).json({ 
+      return res.status(400).json({ 
           error: "Holdings array is required for scraping. For cached articles, leave holdings empty." 
-        });
+      });
       }
     }
 
@@ -448,7 +448,7 @@ app.post("/api/news/holdings/enriched", async (req, res) => {
         error: "Invalid holdings array. Expected array of ticker strings."
       });
     }
-
+    
     // Load holdings from DB
     const db = getDatabase();
     const placeholders = tickers.map(() => "?").join(",");
@@ -542,13 +542,13 @@ app.post("/api/enrichment/triage", async (req, res) => {
       
       // Get articles for these holdings
       const { getCachedArticlesForHoldings } = require("./articleStorage");
-      let sourceArray = null;
-      if (sources) {
-        sourceArray = Array.isArray(sources) 
-          ? sources 
-          : sources.split(',').map(s => s.trim().toLowerCase()).filter(s => s);
-      }
-      
+    let sourceArray = null;
+    if (sources) {
+      sourceArray = Array.isArray(sources) 
+        ? sources 
+        : sources.split(',').map(s => s.trim().toLowerCase()).filter(s => s);
+    }
+
       articles = getCachedArticlesForHoldings(holdingsFromDB, {
         from: from || undefined,
         to: to || undefined,
@@ -743,7 +743,7 @@ app.post("/api/enrichment/enrich", async (req, res) => {
         delayBetweenBatches: 1000,
       }
     );
-    
+
     const enrichedCount = enrichedArticles.filter(a => a.summary || a.whyItMatters).length;
     
     res.json({
@@ -754,7 +754,7 @@ app.post("/api/enrichment/enrich", async (req, res) => {
     });
   } catch (error) {
     console.error("Error running enrichment step:", error);
-    res.status(500).json({
+    res.status(500).json({ 
       error: "Failed to run enrichment step",
       details: error.message,
     });
@@ -796,7 +796,7 @@ app.post("/api/articles/process", async (req, res) => {
     const { holdings: holdingsArray, userProfile = "balanced", topN, incremental = true } = req.body;
     console.log("[Backend] Parsed request:", { holdingsArray, userProfile, topN, incremental });
 
-    const db = getDatabase();
+      const db = getDatabase();
     const DEFAULT_USER_ID = 1;
     console.log("[Backend] Using DEFAULT_USER_ID:", DEFAULT_USER_ID);
 
@@ -957,7 +957,7 @@ app.post("/api/articles/process", async (req, res) => {
           status: art.status
         });
       });
-    } else {
+  } else {
       console.log("[Backend] ❌ No articles found that need processing");
       console.log("[Backend] Debugging: Checking why no articles were found...");
       
@@ -1115,6 +1115,245 @@ app.post("/api/articles/rank", async (req, res) => {
     res.status(500).json({
       error: "Failed to rank articles",
       details: error.message,
+    });
+  }
+});
+
+// GET /api/articles - Public API endpoint for external apps to query articles by ticker symbols
+// Example: /api/articles?tickers=NVDA,AAPL&limit=50&minScore=40
+app.get("/api/articles", (req, res) => {
+  try {
+    const { 
+      tickers,           // Required: comma-separated ticker symbols (e.g., "NVDA,AAPL")
+      limit = 50,        // Optional: max number of articles to return (default: 50)
+      minScore,          // Optional: minimum relevance score (default: no filter)
+      from,              // Optional: start date (ISO format: "2025-01-01")
+      to,                // Optional: end date (ISO format: "2025-12-31")
+      sources,           // Optional: comma-separated sources (e.g., "gnews,newsapi")
+      processedOnly = "true" // Optional: only return processed articles with scores (default: true)
+    } = req.query;
+
+    console.log(`[API /api/articles] Query received - tickers: ${tickers}, limit: ${limit}, minScore: ${minScore}, processedOnly: ${processedOnly}`);
+
+    // Validate required parameter
+    if (!tickers) {
+      return res.status(400).json({
+        error: "Missing required parameter: tickers",
+        message: "Please provide ticker symbols as comma-separated values (e.g., ?tickers=NVDA,AAPL)"
+      });
+    }
+
+    const db = getDatabase();
+    
+    // Parse tickers (uppercase, trim, filter empty)
+    const tickerArray = tickers
+      .split(',')
+      .map(t => t.trim().toUpperCase())
+      .filter(t => t.length > 0);
+
+    if (tickerArray.length === 0) {
+      return res.status(400).json({
+        error: "Invalid tickers parameter",
+        message: "Please provide at least one valid ticker symbol"
+      });
+    }
+
+    console.log(`[API /api/articles] Parsed tickers: ${tickerArray.join(', ')}`);
+
+    // Build SQL query
+    let sql = "SELECT * FROM articles WHERE 1=1";
+    const params = [];
+
+    // Filter by tickers in searched_by field (exact match or comma-separated)
+    const tickerConditions = tickerArray.map(ticker => {
+      return `(
+        searched_by = ? 
+        OR searched_by LIKE ? || ',%'
+        OR searched_by LIKE '%,' || ? || ',%'
+        OR searched_by LIKE '%,' || ?
+      )`;
+    }).join(' OR ');
+    
+    sql += ` AND (${tickerConditions})`;
+    
+    // Add parameters for each ticker (4 params per ticker)
+    for (const ticker of tickerArray) {
+      params.push(ticker, ticker, ticker, ticker);
+    }
+
+    // Filter by processed status if requested
+    if (processedOnly === "true" || processedOnly === true) {
+      sql += ` AND (
+        (status = 'personalized' OR status = 'ranked')
+        AND status != 'discarded'
+        AND (profile_adjusted_score IS NOT NULL OR final_rank_score IS NOT NULL)
+      )`;
+    } else {
+      // Exclude discarded articles even if processedOnly is false
+      sql += ` AND status != 'discarded'`;
+    }
+
+    // Filter by minimum score if provided
+    if (minScore) {
+      const score = parseFloat(minScore);
+      if (!isNaN(score)) {
+        sql += ` AND COALESCE(final_rank_score, profile_adjusted_score, 0) >= ?`;
+        params.push(score);
+      }
+    }
+
+    // Filter by sources if provided
+    if (sources) {
+      const sourceArray = sources
+        .split(',')
+        .map(s => s.trim().toLowerCase())
+        .filter(s => s.length > 0);
+      
+      if (sourceArray.length > 0) {
+        const placeholders = sourceArray.map(() => "?").join(",");
+        sql += ` AND feed_source IN (${placeholders})`;
+        params.push(...sourceArray);
+      }
+    }
+
+    // Filter by date range
+    if (from) {
+      sql += " AND published_at >= ?";
+      params.push(from);
+    }
+    
+    if (to) {
+      sql += " AND published_at <= ?";
+      params.push(to);
+    }
+
+    // Order by relevance score (if available) or by date
+    if (processedOnly === "true" || processedOnly === true) {
+      sql += " ORDER BY COALESCE(final_rank_score, profile_adjusted_score) DESC, published_at DESC";
+    } else {
+      sql += " ORDER BY published_at DESC";
+    }
+
+    // Apply limit
+    sql += " LIMIT ?";
+    params.push(parseInt(limit) || 50);
+
+    console.log(`[API /api/articles] Executing query with ${params.length} parameters`);
+
+    // Execute query
+    const rows = db.prepare(sql).all(...params);
+
+    console.log(`[API /api/articles] Found ${rows.length} articles`);
+
+    // Transform rows to clean JSON format
+    const articles = rows.map(row => {
+      // Parse relevance scores from JSON if available
+      let relevanceScores = {};
+      if (row.relevance_scores_json) {
+        try {
+          relevanceScores = JSON.parse(row.relevance_scores_json);
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+
+      // Build clean article object
+      const article = {
+        id: row.url, // Use URL as unique identifier
+        title: row.title,
+        description: row.description,
+        url: row.url,
+        source: {
+          name: row.source_name,
+          id: row.source_id || null,
+        },
+        author: row.author || null,
+        publishedAt: row.published_at,
+        imageUrl: row.url_to_image || null,
+        content: row.content || null,
+        searchedBy: row.searched_by || null,
+        feedSource: row.feed_source || null,
+      };
+
+      // Add enrichment data if available
+      if (row.summary_enriched || row.summary_short) {
+        article.summary = row.summary_enriched || row.summary_short || "";
+      }
+
+      if (row.why_it_matters || row.personalized_teaser) {
+        article.whyItMatters = row.why_it_matters || row.personalized_teaser || "";
+      }
+
+      // Add relevance scores
+      if (Object.keys(relevanceScores).length > 0) {
+        article.relevanceScores = relevanceScores;
+      }
+
+      // Add processing scores if available
+      if (row.profile_adjusted_score !== null) {
+        article.relevanceScore = row.profile_adjusted_score;
+      }
+      
+      if (row.final_rank_score !== null) {
+        article.finalRankScore = row.final_rank_score;
+      }
+
+      // Add sentiment and impact data if available
+      if (row.sentiment !== null) {
+        article.sentiment = {
+          score: row.sentiment,
+          label: row.sentiment_label || null,
+        };
+      }
+
+      if (row.impact_score !== null) {
+        article.impactScore = row.impact_score;
+      }
+
+      // Add matched tickers/sectors if available
+      if (row.matched_tickers) {
+        try {
+          article.matchedTickers = JSON.parse(row.matched_tickers);
+        } catch (e) {
+          article.matchedTickers = row.matched_tickers.split(',').map(t => t.trim());
+        }
+      }
+
+      if (row.matched_sectors) {
+        try {
+          article.matchedSectors = JSON.parse(row.matched_sectors);
+        } catch (e) {
+          article.matchedSectors = row.matched_sectors.split(',').map(s => s.trim());
+        }
+      }
+
+      // Add status
+      article.status = row.status || null;
+
+      return article;
+    });
+
+    // Return response
+    res.json({
+      status: "ok",
+      query: {
+        tickers: tickerArray,
+        limit: parseInt(limit) || 50,
+        minScore: minScore ? parseFloat(minScore) : null,
+        from: from || null,
+        to: to || null,
+        sources: sources ? sources.split(',').map(s => s.trim()) : null,
+        processedOnly: processedOnly === "true" || processedOnly === true,
+      },
+      totalResults: articles.length,
+      articles: articles,
+    });
+
+  } catch (error) {
+    console.error("Error querying articles:", error);
+    res.status(500).json({
+      error: "Failed to query articles",
+      details: error.message
     });
   }
 });
