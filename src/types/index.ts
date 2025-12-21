@@ -28,6 +28,10 @@ export interface Article {
   publishedAt: string;
   content: string | null;
   feedSource?: string; // "gnews" or "newsapi" - which API fetched this article
+  discardReason?: string; // Reason why article was discarded (if applicable)
+  status?: string; // Article status (e.g., "discarded", "personalized", etc.)
+  titleRelevance?: number; // Title relevance score (0-3)
+  impactScore?: number; // Impact score if available
 }
 
 /**

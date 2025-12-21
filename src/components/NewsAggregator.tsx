@@ -123,6 +123,28 @@ const SourceCheckboxText = styled.span`
   font-weight: 500;
 `;
 
+const SourceLimitInput = styled.input`
+  width: 60px;
+  padding: 4px 8px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  font-size: 0.875rem;
+  text-align: center;
+  margin-left: 8px;
+  
+  &:focus {
+    outline: none;
+    border-color: #2563eb;
+    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
+  }
+  
+  &:disabled {
+    background-color: #f3f4f6;
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+`;
+
 const Button = styled.button<{ $active?: boolean }>`
   padding: 8px 16px;
   margin: 0 8px;
@@ -439,9 +461,9 @@ const getBackendUrl = () => {
 const fetchNews = async ({
   queryKey,
 }: {
-  queryKey: [string, ViewMode, string, string, number, TimeFilterType, SourceFilterType, boolean, string[], boolean, string[]];
+  queryKey: [string, ViewMode, string, string, number, TimeFilterType, SourceFilterType, boolean, string[], boolean, string[], Record<string, number>];
 }) => {
-  const [, viewMode, category, searchTerm, currentPage, timeFilter, sourceFilter, useEnriched, holdings, shouldScrape, selectedSources] = queryKey;
+  const [, viewMode, category, searchTerm, currentPage, timeFilter, sourceFilter, useEnriched, holdings, shouldScrape, selectedSources, sourceLimits] = queryKey;
   const BACKEND_URL = getBackendUrl();
 
   // If viewing feed, use feed endpoint
@@ -466,6 +488,32 @@ const fetchNews = async ({
     }
   }
 
+  // If viewing discarded articles, use discarded endpoint
+  if (viewMode === "discarded") {
+    try {
+      const params: any = {
+        limit: 100,
+      };
+      if (timeFilter.fromDate) params.from = timeFilter.fromDate;
+      if (timeFilter.toDate) params.to = timeFilter.toDate;
+      if (sourceFilter.sources && sourceFilter.sources.length > 0) {
+        params.sources = sourceFilter.sources.join(',');
+      }
+      if (holdings && Array.isArray(holdings) && holdings.length > 0) {
+        params.holdings = holdings.join(',');
+      }
+      
+      const response = await axios.get(`${BACKEND_URL}/api/articles/discarded`, { params });
+      return response.data.articles || [];
+    } catch (error: any) {
+      console.error("[fetchNews] Error fetching discarded articles:", error);
+      if (axios.isAxiosError(error) && error.response) {
+        throw new Error(error.response.data?.error || "Failed to fetch discarded articles");
+      }
+      throw error;
+    }
+  }
+
   // If enriched mode is enabled, use enriched endpoint
   if (useEnriched) {
     // If no holdings, fetch all articles from DB (backend supports empty holdings array for cached articles)
@@ -483,6 +531,7 @@ const fetchNews = async ({
         from: timeFilter.fromDate || undefined,
         to: timeFilter.toDate || undefined,
         sources: sourcesToUse,
+        sourceLimits: sourceLimits || { newsapi: 10, gnews: 10, googlerss: 10 }, // Pass per-source article limits
         scrape: shouldScrape,
       });
       console.log(`[fetchNews] Received ${response.data.articles?.length || 0} articles from enriched endpoint, scrape was: ${shouldScrape}`);
@@ -538,13 +587,18 @@ const fetchNews = async ({
       if (sourceFilter.sources && sourceFilter.sources.length > 0) {
         params.append("sources", sourceFilter.sources.join(","));
       }
+      
+      // Add source limits if provided
+      if (sourceLimits) {
+        params.append("sourceLimits", JSON.stringify(sourceLimits));
+      }
 
       const url = `${BACKEND_URL}/api/news?${params.toString()}`;
       const response = await axios.get(url);
       return response.data.articles || [];
 };
 
-type ViewMode = "all" | "feed";
+type ViewMode = "all" | "feed" | "discarded";
 
 const NewsAggregator: React.FC = () => {
   const queryClient = useQueryClient();
@@ -570,6 +624,10 @@ const NewsAggregator: React.FC = () => {
     const saved = localStorage.getItem("wealthyRabbitSelectedSources");
     return saved ? JSON.parse(saved) : ['newsapi', 'gnews', 'googlerss']; // Default: all sources
   });
+  const [sourceLimits, setSourceLimits] = useState<Record<string, number>>(() => {
+    const saved = localStorage.getItem("wealthyRabbitSourceLimits");
+    return saved ? JSON.parse(saved) : { newsapi: 10, gnews: 10, googlerss: 10 }; // Default: 10 per source
+  });
   const [triageLoading, setTriageLoading] = useState<boolean>(false);
   const [enrichLoading, setEnrichLoading] = useState<boolean>(false);
   const [clearLoading, setClearLoading] = useState<boolean>(false);
@@ -577,6 +635,7 @@ const NewsAggregator: React.FC = () => {
   const [rankingLoading, setRankingLoading] = useState<boolean>(false);
   const [stepMessage, setStepMessage] = useState<string>("");
   const [showApiTestPage, setShowApiTestPage] = useState<boolean>(false);
+  const [scrapedArticleCount, setScrapedArticleCount] = useState<number | null>(null);
 
   // Time filter state
   const [timeFilter, setTimeFilter] = useState<TimeFilterType>(() => {
@@ -620,7 +679,7 @@ const NewsAggregator: React.FC = () => {
     error,
     refetch,
   } = useQuery({
-    queryKey: ["news", viewMode, category, searchTerm, currentPage, timeFilter, sourceFilter, useEnriched, holdingsTickers, shouldScrape, selectedSources],
+    queryKey: ["news", viewMode, category, searchTerm, currentPage, timeFilter, sourceFilter, useEnriched, holdingsTickers, shouldScrape, selectedSources, sourceLimits],
     queryFn: fetchNews,
     staleTime: shouldScrape ? 0 : 5 * 60 * 1000, // Force fresh data when scraping
     refetchOnWindowFocus: false,
@@ -644,6 +703,7 @@ const NewsAggregator: React.FC = () => {
       setCategory(newCategory);
       setCurrentPage(1);
       setShouldScrape(false); // Always use cached articles when filters change
+      setScrapedArticleCount(null); // Reset scraped count when filters change
       localStorage.setItem("newsCategory", newCategory);
       localStorage.setItem("newsPage", "1");
     }
@@ -653,6 +713,7 @@ const NewsAggregator: React.FC = () => {
     setTimeFilter(filter);
     setCurrentPage(1); // Reset to first page when filter changes
     setShouldScrape(false); // Always use cached articles when filters change
+    setScrapedArticleCount(null); // Reset scraped count when filters change
     localStorage.setItem("wealthyRabbitTimeFilter", JSON.stringify(filter));
     localStorage.setItem("newsPage", "1");
   };
@@ -661,6 +722,7 @@ const NewsAggregator: React.FC = () => {
     setSourceFilter(filter);
     setCurrentPage(1); // Reset to first page when filter changes
     setShouldScrape(false); // Always use cached articles when filters change
+    setScrapedArticleCount(null); // Reset scraped count when filters change
     localStorage.setItem("wealthyRabbitSourceFilter", JSON.stringify(filter));
     localStorage.setItem("newsPage", "1");
   };
@@ -669,6 +731,7 @@ const NewsAggregator: React.FC = () => {
     setUseEnriched(enabled);
     setCurrentPage(1); // Reset to first page when mode changes
     setShouldScrape(false); // Always use cached articles when mode changes
+    setScrapedArticleCount(null); // Reset scraped count when mode changes
     localStorage.setItem("wealthyRabbitUseEnriched", enabled.toString());
     localStorage.setItem("newsPage", "1");
   };
@@ -677,6 +740,7 @@ const NewsAggregator: React.FC = () => {
     const value = e.target.value;
     setSearchTerm(value);
     setShouldScrape(false); // Always use cached articles when search changes
+    setScrapedArticleCount(null); // Reset scraped count when search changes
     localStorage.setItem("newsSearch", value);
   };
 
@@ -839,6 +903,9 @@ const NewsAggregator: React.FC = () => {
         <TabButton $active={viewMode === "feed"} onClick={() => handleViewModeChange("feed")}>
           ⭐ My Feed
         </TabButton>
+        <TabButton $active={viewMode === "discarded"} onClick={() => handleViewModeChange("discarded")}>
+          🗑️ Discarded
+        </TabButton>
       </TabContainer>
       {viewMode === "feed" && (
         <div style={{ 
@@ -852,6 +919,20 @@ const NewsAggregator: React.FC = () => {
         }}>
           💡 <strong>My Feed</strong> shows articles that have completed all processing stages (personalized and ranked). 
           These are the most relevant articles for your holdings, sorted by relevance score.
+        </div>
+      )}
+      {viewMode === "discarded" && (
+        <div style={{ 
+          padding: "12px", 
+          backgroundColor: "#fef2f2", 
+          borderRadius: "8px", 
+          marginBottom: "16px",
+          border: "1px solid #fecaca",
+          fontSize: "0.875rem",
+          color: "#991b1b"
+        }}>
+          🗑️ <strong>Discarded Articles</strong> shows articles that were filtered out during the triage and classification stages. 
+          Each article displays the reason why it was discarded. Use this view to review and understand the filtering logic.
         </div>
       )}
       {viewMode === "all" && (
@@ -876,10 +957,17 @@ const NewsAggregator: React.FC = () => {
           <SourceFilter value={sourceFilter} onChange={handleSourceFilterChange} />
         </>
       )}
+      {viewMode === "discarded" && (
+        <>
+          <TimeFilter value={timeFilter} onChange={handleTimeFilterChange} />
+          <SourceFilter value={sourceFilter} onChange={handleSourceFilterChange} />
+        </>
+      )}
       {viewMode === "all" && (
         <>
           <SourceCheckboxContainer>
             <span style={{ fontWeight: 600, color: "#374151", marginRight: "8px" }}>Scrape from:</span>
+            <span style={{ fontSize: "0.75rem", color: "#6b7280", marginLeft: "auto" }}>Max articles per source:</span>
             <SourceCheckboxLabel>
               <SourceCheckbox
                 type="checkbox"
@@ -893,6 +981,20 @@ const NewsAggregator: React.FC = () => {
                 }}
               />
               <SourceCheckboxText>NewsAPI</SourceCheckboxText>
+              <SourceLimitInput
+                type="number"
+                min="1"
+                max="100"
+                value={sourceLimits.newsapi || 10}
+                disabled={!selectedSources.includes('newsapi')}
+                onChange={(e) => {
+                  const value = Math.max(1, Math.min(100, parseInt(e.target.value) || 10));
+                  const newLimits = { ...sourceLimits, newsapi: value };
+                  setSourceLimits(newLimits);
+                  localStorage.setItem("wealthyRabbitSourceLimits", JSON.stringify(newLimits));
+                }}
+                title="Max articles from NewsAPI"
+              />
             </SourceCheckboxLabel>
             <SourceCheckboxLabel>
               <SourceCheckbox
@@ -907,6 +1009,20 @@ const NewsAggregator: React.FC = () => {
                 }}
               />
               <SourceCheckboxText>GNews</SourceCheckboxText>
+              <SourceLimitInput
+                type="number"
+                min="1"
+                max="100"
+                value={sourceLimits.gnews || 10}
+                disabled={!selectedSources.includes('gnews')}
+                onChange={(e) => {
+                  const value = Math.max(1, Math.min(100, parseInt(e.target.value) || 10));
+                  const newLimits = { ...sourceLimits, gnews: value };
+                  setSourceLimits(newLimits);
+                  localStorage.setItem("wealthyRabbitSourceLimits", JSON.stringify(newLimits));
+                }}
+                title="Max articles from GNews"
+              />
             </SourceCheckboxLabel>
             <SourceCheckboxLabel>
               <SourceCheckbox
@@ -921,6 +1037,20 @@ const NewsAggregator: React.FC = () => {
                 }}
               />
               <SourceCheckboxText>Google RSS</SourceCheckboxText>
+              <SourceLimitInput
+                type="number"
+                min="1"
+                max="100"
+                value={sourceLimits.googlerss || 10}
+                disabled={!selectedSources.includes('googlerss')}
+                onChange={(e) => {
+                  const value = Math.max(1, Math.min(100, parseInt(e.target.value) || 10));
+                  const newLimits = { ...sourceLimits, googlerss: value };
+                  setSourceLimits(newLimits);
+                  localStorage.setItem("wealthyRabbitSourceLimits", JSON.stringify(newLimits));
+                }}
+                title="Max articles from Google RSS"
+              />
             </SourceCheckboxLabel>
           </SourceCheckboxContainer>
           <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "16px", flexWrap: "wrap" }}>
@@ -928,6 +1058,9 @@ const NewsAggregator: React.FC = () => {
               onClick={async () => {
                 console.log("[ScrapeButton] Clicked - directly calling API with scrape=true");
                 console.log("[ScrapeButton] Selected sources:", selectedSources);
+                
+                // Reset scraped count at start of new scrape
+                setScrapedArticleCount(null);
                 
                 // Ensure at least one source is selected
                 if (selectedSources.length === 0) {
@@ -939,9 +1072,9 @@ const NewsAggregator: React.FC = () => {
                   const BACKEND_URL = getBackendUrl();
                   let response;
                   
-                  // If user has holdings, ALWAYS use enriched endpoint (even if toggle is off)
-                  // This ensures holdings are taken into account when scraping
-                  if (holdingsTickers.length > 0) {
+                  // If user has holdings, use enriched endpoint
+                  // Otherwise, use regular news endpoint
+                  if (holdingsTickers && holdingsTickers.length > 0) {
                     // Enriched news endpoint - uses holdings to search
                     console.log(`[ScrapeButton] Scraping enriched news for holdings: ${holdingsTickers.join(', ')}`);
                     response = await axios.post(`${BACKEND_URL}/api/news/holdings/enriched`, {
@@ -950,13 +1083,18 @@ const NewsAggregator: React.FC = () => {
                       from: timeFilter.fromDate || undefined,
                       to: timeFilter.toDate || undefined,
                       sources: selectedSources.length > 0 ? selectedSources : undefined,
+                      sourceLimits: sourceLimits, // Pass per-source article limits
                       scrape: true, // Force scrape
                     });
                   } else {
-                    // Regular news endpoint - only if no holdings
+                    // Regular news endpoint - when no holdings
                     console.log(`[ScrapeButton] Scraping regular news for category: ${category} (no holdings)`);
                     const params = new URLSearchParams();
-                    params.append("category", category);
+                    if (searchTerm) {
+                      params.append("search", searchTerm);
+                    } else {
+                      params.append("category", category);
+                    }
                     params.append("page", currentPage.toString());
                     params.append("scrape", "true");
                     if (timeFilter.fromDate) params.append("from", timeFilter.fromDate);
@@ -964,6 +1102,8 @@ const NewsAggregator: React.FC = () => {
                     if (selectedSources.length > 0) {
                       params.append("sources", selectedSources.join(','));
                     }
+                    // Add source limits as JSON in query params
+                    params.append("sourceLimits", JSON.stringify(sourceLimits));
                     
                     response = await axios.get(`${BACKEND_URL}/api/news?${params.toString()}`);
                   }
@@ -976,32 +1116,39 @@ const NewsAggregator: React.FC = () => {
                 const uniqueUrls = new Set(articleUrls);
                 console.log(`[ScrapeButton] Total articles: ${articleUrls.length}, Unique URLs: ${uniqueUrls.size}`);
                 
+                // Capture the fetched article count from the API response
+                const fetchedCount = response.data.fetched || response.data.articles?.length || 0;
+                setScrapedArticleCount(fetchedCount);
+                
                 // Update the query cache with the new data for BOTH scrape=true and scrape=false queryKeys
-                const queryKeyWithScrape: [string, ViewMode, string, string, number, TimeFilterType, SourceFilterType, boolean, string[], boolean] = 
-                  ["news", viewMode, category, searchTerm, currentPage, timeFilter, sourceFilter, useEnriched, holdingsTickers, true];
-                const queryKeyNoScrape: [string, ViewMode, string, string, number, TimeFilterType, SourceFilterType, boolean, string[], boolean] = 
-                  ["news", viewMode, category, searchTerm, currentPage, timeFilter, sourceFilter, useEnriched, holdingsTickers, false];
+                const queryKeyWithScrape: [string, ViewMode, string, string, number, TimeFilterType, SourceFilterType, boolean, string[], boolean, string[], Record<string, number>] = 
+                  ["news", viewMode, category, searchTerm, currentPage, timeFilter, sourceFilter, useEnriched, holdingsTickers, true, selectedSources, sourceLimits];
+                const queryKeyNoScrape: [string, ViewMode, string, string, number, TimeFilterType, SourceFilterType, boolean, string[], boolean, string[], Record<string, number>] = 
+                  ["news", viewMode, category, searchTerm, currentPage, timeFilter, sourceFilter, useEnriched, holdingsTickers, false, selectedSources, sourceLimits];
                 
                 // Set data in both caches so UI updates regardless of which queryKey is active
                 queryClient.setQueryData(queryKeyWithScrape, response.data.articles || []);
                 queryClient.setQueryData(queryKeyNoScrape, response.data.articles || []);
                 
-                // Set shouldScrape to true to trigger scrape
-                setShouldScrape(true);
-                
-                // Invalidate all news queries to force UI refresh
-                // The useEffect will reset shouldScrape after successful fetch
-                await queryClient.invalidateQueries({ queryKey: ["news"] });
+                // Don't set shouldScrape or invalidate - we already have the fresh data in cache
+                // This prevents a double scrape when React Query refetches
               } catch (error: any) {
                 console.error("[ScrapeButton] Error scraping articles:", error);
-                alert(`Error scraping articles: ${error.response?.data?.error || error.message}`);
+                const errorMessage = error.response?.data?.error || error.response?.data?.message || error.message;
+                const detailedError = error.response?.data?.details ? `\n\nDetails: ${error.response.data.details}` : '';
+                alert(`Error scraping articles: ${errorMessage}${detailedError}`);
               }
             }}
             disabled={loading}
           >
             {loading ? "⏳ Scraping..." : "🔄 Scrape New Articles"}
           </ScrapeButton>
-          {!loading && news.length > 0 && (
+          {scrapedArticleCount !== null && (
+            <span style={{ color: "#10b981", fontSize: "0.875rem", fontWeight: "600" }}>
+              ✅ Scraped {scrapedArticleCount} article{scrapedArticleCount !== 1 ? "s" : ""}
+            </span>
+          )}
+          {!loading && news.length > 0 && scrapedArticleCount === null && (
             <span style={{ color: "#6b7280", fontSize: "0.875rem" }}>
               Showing {news.length} cached article{news.length !== 1 ? "s" : ""}. Click "Scrape" to fetch new ones.
             </span>
@@ -1129,6 +1276,13 @@ const NewsAggregator: React.FC = () => {
                 </ol>
               </div>
             </>
+          ) : viewMode === "discarded" ? (
+            <>
+              <h3 style={{ marginTop: 0, color: "#374151" }}>🗑️ No Discarded Articles</h3>
+              <p style={{ color: "#6b7280" }}>
+                No articles have been discarded yet. Articles are discarded during the triage and classification stages.
+              </p>
+            </>
           ) : (
             <>
               <h3 style={{ marginTop: 0, color: "#374151" }}>No articles found</h3>
@@ -1174,6 +1328,50 @@ const NewsAggregator: React.FC = () => {
                       </PublicationDate>
                     )}
                   </ArticleMeta>
+                  
+                  {viewMode === "discarded" && article.discardReason && (
+                    <EnrichmentSection>
+                      <div style={{ 
+                        padding: "12px", 
+                        backgroundColor: "#fef2f2", 
+                        borderRadius: "6px", 
+                        border: "1px solid #fecaca",
+                        marginTop: "8px"
+                      }}>
+                        <div style={{ 
+                          display: "flex", 
+                          alignItems: "center", 
+                          gap: "8px", 
+                          marginBottom: "4px" 
+                        }}>
+                          <span style={{ fontSize: "1rem" }}>🗑️</span>
+                          <strong style={{ color: "#991b1b", fontSize: "0.875rem" }}>
+                            Discarded Reason:
+                          </strong>
+                        </div>
+                        <p style={{ 
+                          color: "#7f1d1d", 
+                          fontSize: "0.875rem", 
+                          margin: "4px 0 0 0",
+                          fontStyle: "italic"
+                        }}>
+                          {article.discardReason}
+                        </p>
+                        {article.titleRelevance !== null && article.titleRelevance !== undefined && (
+                          <div style={{ 
+                            marginTop: "8px", 
+                            fontSize: "0.75rem", 
+                            color: "#6b7280" 
+                          }}>
+                            Title Relevance: {article.titleRelevance}/3
+                            {article.impactScore !== null && article.impactScore !== undefined && (
+                              <> | Impact Score: {article.impactScore}</>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    </EnrichmentSection>
+                  )}
                   
                   {enrichedArticle?.summary && (
                     <EnrichmentSection>
