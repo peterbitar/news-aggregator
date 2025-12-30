@@ -14,7 +14,6 @@ const openai = new OpenAI({
  * - profile_adjusted_score (0-100)
  * - summary_short
  * - summary_medium
- * - summary_long
  * - personalized_title
  * - personalized_teaser
  * - status = "personalized"
@@ -133,6 +132,26 @@ async function processPersonalization(article, userHoldings = [], userProfile = 
     }
     // If no match, keeps base score of 20 (ensures macro/market news still appears)
 
+    // Calculate exposure level (low/moderate/high) for user clarity
+    // Philosophy: Help user understand their personal risk/opportunity exposure
+    let exposure_level = "low";
+    const numMatchedHoldings = matchedHoldings.length;
+    const eventType = (articleRow.event_type || "").toLowerCase();
+    const isSystemicEvent = eventType.includes("macro") || eventType.includes("market") ||
+                            eventType.includes("regulation") || eventType.includes("recession") ||
+                            eventType.includes("fed") || eventType.includes("inflation");
+
+    if (isSystemicEvent || numMatchedHoldings >= 3) {
+      exposure_level = "high"; // Systemic events or 3+ holdings affected
+    } else if (numMatchedHoldings >= 2) {
+      exposure_level = "moderate"; // 2 holdings affected
+    } else if (numMatchedHoldings === 1) {
+      exposure_level = "low"; // Only 1 holding affected
+    } else {
+      // No holdings matched - check if it's macro/market news
+      exposure_level = isSystemicEvent ? "moderate" : "low";
+    }
+
     // IMPORTANT: Stage 4 Personalization does NOT generate new summaries or change meaning
     // It ONLY adjusts scoring/priority based on holdings match and user profile
     // Interpretation (verdict, why, action) is global and set in Stage 3, reused across all users
@@ -175,6 +194,7 @@ async function processPersonalization(article, userHoldings = [], userProfile = 
         holding_relevance_score = ?,
         profile_adjusted_score = ?,
         profile_type_cached = ?,
+        exposure_level = ?,
         status = ?,
         updated_at = datetime('now')
       WHERE url = ?
@@ -182,6 +202,7 @@ async function processPersonalization(article, userHoldings = [], userProfile = 
       holding_relevance_score,
       profile_adjusted_score,
       userProfile, // Cache the profile type
+      exposure_level,
       status,
       article.url
     );

@@ -32,6 +32,26 @@ function addColumnIfNotExists(db, tableName, columnName, columnDef) {
   }
 }
 
+/**
+ * Helper function to drop a column from a table if it exists
+ * Note: Requires SQLite 3.35.0+ (better-sqlite3 11.6.0+ supports this)
+ */
+function dropColumnIfExists(db, tableName, columnName) {
+  if (columnExists(db, tableName, columnName)) {
+    try {
+      db.prepare(`ALTER TABLE ${tableName} DROP COLUMN ${columnName}`).run();
+      console.log(`Dropped column ${columnName} from ${tableName}`);
+    } catch (error) {
+      // If DROP COLUMN is not supported, log warning but don't fail
+      if (error.message.includes('DROP COLUMN') || error.message.includes('syntax error')) {
+        console.warn(`DROP COLUMN not supported in this SQLite version. Column ${columnName} will remain but unused.`);
+      } else {
+        console.error(`Error dropping column ${columnName} from ${tableName}:`, error);
+      }
+    }
+  }
+}
+
 // Initialize and configure database
 function initDatabase() {
   // Create database connection
@@ -87,19 +107,28 @@ function initDatabase() {
     )
   `);
 
-  // Add all required columns if they don't exist
-  // Note: We'll keep url as PRIMARY KEY, but add id as a unique indexed column
-  addColumnIfNotExists(db, "articles", "id", "INTEGER");
+  // Remove unused columns from existing databases (migration)
+  // These columns were removed as they were never used
   
-  // Create unique index on id if it doesn't exist (after column is added)
-  if (columnExists(db, "articles", "id")) {
-    try {
-      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_articles_id ON articles(id) WHERE id IS NOT NULL`);
-    } catch (error) {
-      // Index might already exist, ignore
-    }
+  // Drop the unused index on id first (before dropping the column)
+  try {
+    db.exec(`DROP INDEX IF EXISTS idx_articles_id`);
+  } catch (error) {
+    // Ignore errors - index might not exist
   }
-  addColumnIfNotExists(db, "articles", "canonical_url", "TEXT");
+  
+  // Now drop the unused columns
+  dropColumnIfExists(db, "articles", "canonical_url");
+  dropColumnIfExists(db, "articles", "hash_title");
+  dropColumnIfExists(db, "articles", "hash_content");
+  dropColumnIfExists(db, "articles", "readability_score");
+  dropColumnIfExists(db, "articles", "language");
+  dropColumnIfExists(db, "articles", "id"); // Redundant - url is already PK
+  dropColumnIfExists(db, "articles", "priority");
+  dropColumnIfExists(db, "articles", "is_paywalled");
+  dropColumnIfExists(db, "articles", "summary_long");
+
+  // Add all required columns if they don't exist
   addColumnIfNotExists(db, "articles", "feed_source", "TEXT");
   addColumnIfNotExists(db, "articles", "raw_html", "TEXT");
   addColumnIfNotExists(db, "articles", "clean_text", "TEXT");
@@ -134,7 +163,6 @@ function initDatabase() {
   addColumnIfNotExists(db, "articles", "profile_adjusted_score", "REAL");
   addColumnIfNotExists(db, "articles", "summary_short", "TEXT");
   addColumnIfNotExists(db, "articles", "summary_medium", "TEXT");
-  addColumnIfNotExists(db, "articles", "summary_long", "TEXT");
   addColumnIfNotExists(db, "articles", "personalized_teaser", "TEXT");
   addColumnIfNotExists(db, "articles", "personalized_title", "TEXT");
   addColumnIfNotExists(db, "articles", "profile_type_cached", "TEXT"); // Cache profile type for personalization reuse
@@ -143,13 +171,7 @@ function initDatabase() {
   addColumnIfNotExists(db, "articles", "is_primary_in_cluster", "INTEGER DEFAULT 0");
   addColumnIfNotExists(db, "articles", "shown_to_user", "INTEGER DEFAULT 0");
   addColumnIfNotExists(db, "articles", "shown_timestamp", "TEXT");
-  addColumnIfNotExists(db, "articles", "hash_title", "TEXT");
-  addColumnIfNotExists(db, "articles", "hash_content", "TEXT");
-  addColumnIfNotExists(db, "articles", "priority", "INTEGER DEFAULT 0");
-  addColumnIfNotExists(db, "articles", "is_paywalled", "INTEGER DEFAULT 0");
-  addColumnIfNotExists(db, "articles", "readability_score", "REAL");
   addColumnIfNotExists(db, "articles", "likely_impact", "REAL"); // Lightweight impact guess (0-100)
-  addColumnIfNotExists(db, "articles", "language", "TEXT");
   addColumnIfNotExists(db, "articles", "searched_by", "TEXT"); // Ticker/keyword used to find this article (comma-separated for multiple)
   addColumnIfNotExists(db, "articles", "should_enrich", "INTEGER DEFAULT 1"); // Whether article should be enriched (1 = yes, 0 = no)
   addColumnIfNotExists(db, "articles", "triage_reason", "TEXT"); // Reason why article should/shouldn't be enriched

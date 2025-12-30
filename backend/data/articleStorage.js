@@ -633,7 +633,7 @@ function getFeedArticles(options = {}) {
       // Add all enrichment data
       return {
         ...article,
-        summary: row.summary_short || row.summary_medium || row.summary_long || row.summary_enriched || "",
+        summary: row.summary_short || row.summary_medium || row.summary_enriched || "",
         whyItMatters: row.why_it_matters || row.personalized_teaser || "",
         relevanceScores: relevanceScores,
         // Add pipeline metadata
