@@ -9,6 +9,8 @@ const { getDatabase } = require("../data/db");
 const { getRankedForFeed } = require("../data/articleStorage");
 const { mapArticleRowsToSignals } = require("./signalMapper");
 const { enforceSignalGuardrails } = require("../decisions/guardrails");
+const { getUserHoldings } = require("../services/userHoldingsService");
+const { generateRabbitExplanations, attachExplanations } = require("../services/rabbitPersonalizationService");
 
 const router = express.Router();
 
@@ -76,6 +78,90 @@ router.get("/feed", async (req, res) => {
   } catch (error) {
     console.error("[v1/feed] Error:", error);
     res.status(500).json({ error: "Failed to fetch feed" });
+  }
+});
+
+/**
+ * GET /v1/personalized-feed
+ * Returns personalized feed with Wealthy Rabbit explanations
+ *
+ * This endpoint:
+ * 1. Gets the same ranked articles as /v1/feed
+ * 2. Fetches user holdings
+ * 3. Generates Wealthy Rabbit personalized explanations
+ * 4. Returns articles with explanation objects attached
+ */
+router.get("/personalized-feed", async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 50;
+    const userId = req.userId;
+
+    console.log(`[v1/personalized-feed] Request for user ${userId}, limit: ${limit}`);
+
+    // Step A: Get ranked articles (same as /v1/feed)
+    const articles = getRankedForFeed({ limit, userId });
+
+    if (!articles || articles.length === 0) {
+      console.log('[v1/personalized-feed] No articles found');
+      return res.json({ items: [] });
+    }
+
+    console.log(`[v1/personalized-feed] Found ${articles.length} ranked articles`);
+
+    // Step B: Fetch user holdings
+    const holdings = getUserHoldings(userId);
+    console.log(`[v1/personalized-feed] User has ${holdings.length} holdings: ${holdings.join(', ') || 'none'}`);
+
+    // Step C: Build event objects from articles
+    // Convert database rows to event format expected by personalization service
+    const events = articles.map(article => {
+      // Parse matched_holdings if available
+      let matchedHoldings = [];
+      try {
+        matchedHoldings = article.matched_holdings ? JSON.parse(article.matched_holdings) : [];
+      } catch (e) {
+        // Ignore parse errors
+      }
+
+      // Build rawArticles array (simplified for now, could be enhanced)
+      const rawArticles = [{
+        articleNumber: 1,
+        source: article.source_name || 'Unknown',
+        title: article.title || '',
+        description: article.description || '',
+        body: article.content ? article.content.replace(/<[^>]*>/g, '').substring(0, 1000) : '',
+        url: article.url || '',
+      }];
+
+      return {
+        id: article.url,
+        title: article.personalized_title || article.title || '',
+        shortSummary: article.summary_short || article.summary_enriched || article.description || '',
+        tickerSummary: matchedHoldings.join(', ') || '',
+        impactLevel: article.impact_score >= 70 ? 'high' : article.impact_score >= 40 ? 'medium' : 'low',
+        scopeType: article.category || 'market',
+        opportunitySignal: article.opportunity_type || 'neutral',
+        relevanceType: article.event_type || 'general',
+        profileTier: article.exposure_level || 'medium',
+        rawArticles,
+      };
+    });
+
+    // Step D: Generate Rabbit explanations (batched)
+    const explanations = await generateRabbitExplanations(events, holdings);
+
+    // Step E: Attach explanations to events
+    const personalizedItems = attachExplanations(events, explanations);
+
+    console.log(`[v1/personalized-feed] Returning ${personalizedItems.length} personalized items`);
+
+    res.json({
+      items: personalizedItems,
+      next_cursor: null,
+    });
+  } catch (error) {
+    console.error("[v1/personalized-feed] Error:", error);
+    res.status(500).json({ error: "Failed to fetch personalized feed" });
   }
 });
 
