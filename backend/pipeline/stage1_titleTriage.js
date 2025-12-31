@@ -223,10 +223,13 @@ Return ONLY valid JSON, no markdown formatting.`;
     let status;
     if (title_relevance === 0) {
       status = "discarded"; // Irrelevant - discard immediately
-    } else if (title_relevance === 1 && !should_fetch_full) {
-      status = "discarded"; // Weak relevance and not worth fetching
     } else {
-      status = "title_filtered"; // Continue to Stage 2
+      status = "title_filtered"; // Continue to Stage 1.5 / Stage 2 (relevance 1-3)
+    }
+
+    // Log when discarding
+    if (status === "discarded") {
+      console.log(`[Stage1] DISCARDED id=${article.url.substring(0, 50)} title_relevance=${title_relevance} title_event_type=${title_event_type} should_fetch_full=${should_fetch_full} reason="${title_reason_short}"`);
     }
 
     // Update database
@@ -427,16 +430,16 @@ async function processTitleTriageBatch(articles, userHoldings = []) {
       }
       
       // GUARDRAIL 5A: Check if article mentions holding ticker or issuer name
-      // If searched_by is a holding ticker and article doesn't mention it, discard without LLM
+      // If searched_by is a holding ticker and article doesn't mention it, set flag but continue
       if (article.searchedBy && holdingsFromDB.length > 0) {
         const mentionsHolding = mentionsHoldingInTitleOrDescription(article, article.searchedBy, holdingsFromDB);
         if (!mentionsHolding) {
-          // Mark as low relevance without LLM
-          hardFiltered.push({
-            article,
-            reason: "No mention of holding in title/description",
-          });
-          continue;
+          // Set flag on article object (will be saved to DB later)
+          article.flags = article.flags || {};
+          article.flags.noHoldingMention = true;
+          // Log once per article
+          console.log(`[Stage1] noHoldingMention for searchedBy=${article.searchedBy} title=${(article.title || "").substring(0, 60)}`);
+          // Continue normally to LLM / scoring (do NOT discard)
         }
       }
       
@@ -466,7 +469,7 @@ async function processTitleTriageBatch(articles, userHoldings = []) {
       });
       
       filterTransaction(hardFiltered);
-      console.log(`[Stage 1 Batch] Hard-filtered ${hardFiltered.length} articles without LLM call (including ${hardFiltered.filter(h => h.reason === "No mention of holding in title/description").length} with no holding mention)`);
+      console.log(`[Stage 1 Batch] Hard-filtered ${hardFiltered.length} articles without LLM call`);
     }
     
     if (preFiltered.length === 0) {
@@ -500,23 +503,23 @@ URL: ${article.url}`;
     
     const systemPrompt = `You are a financial news analyst that triages articles based on titles and metadata only.
 
-IMPORTANT: Be STRICT and CONSERVATIVE. Default to relevance 0 or 1 unless the title clearly signals a material, specific financial event.
-
 Relevance guidelines:
-- 0: Completely irrelevant to financial markets/investing, generic content, clickbait
-- 1: Weak relevance - mentions financial terms but no specific event, generic market commentary
-- 2: Moderate relevance - specific event mentioned but not clearly material (minor product updates, general trends)
-- 3: High relevance - clearly material events (earnings beats/misses, M&A announcements, major guidance changes, regulatory decisions, significant product launches)
+- 0: Completely irrelevant to financial markets/investing, generic content, clickbait, no financial context
+- 1: Relevant - mentions company/ticker and has financial/investment context (product news, partnerships, analyst ratings, regulatory updates, price target changes, business developments)
+- 2: Moderate-high relevance - specific material events (product launches, partnerships, regulatory decisions, price target changes, M&A activity, earnings updates)
+- 3: High relevance - clearly material events (earnings beats/misses, major M&A announcements, significant guidance changes, major regulatory decisions)
 
-Only set relevance >= 2 for clearly material, specific events that would affect stock prices or investment decisions.
+Material events that are relevant include: earnings, M&A, product launches, partnerships, regulatory decisions, price target changes, significant business developments, and other news that could affect stock prices or investment decisions.
+
+For articles found by searching for a specific ticker (searchedBy), be MORE LENIENT - if the article mentions that ticker and has financial relevance, prefer relevance 1-2 over 0.
 
 Analyze each article and determine for EACH one:
-1. Relevance score (0-3): BE STRICT - default to 0 or 1 unless clearly material
+1. Relevance score (0-3): If article mentions a ticker and has financial relevance, prefer 1-2 over 0
 2. Event type: earnings, m&a, guidance, macro, regulation, product_tech, industry_trend, other
 3. Brief reason for relevance score
 4. Any ticker symbols mentioned (as JSON array)
 5. Any sectors mentioned (as JSON array)
-6. Whether full content should be fetched (ONLY true for relevance >= 2)
+6. Whether full content should be fetched (true for relevance >= 1, especially when ticker is mentioned)
 
 Return a JSON object where keys are article URLs and values are the analysis:
 {
@@ -531,7 +534,7 @@ Return a JSON object where keys are article URLs and values are the analysis:
   "URL2": { ... }
 }`;
     
-    const userPrompt = `Analyze the following ${preFiltered.length} articles (already filtered for basic quality). BE STRICT - only high relevance (2-3) should have should_fetch_full = true:\n\n${articlesList}\n\nReturn a JSON object with analysis for each article URL.`;
+    const userPrompt = `Analyze the following ${preFiltered.length} articles (already filtered for basic quality). For articles that mention tickers and have financial relevance, set should_fetch_full = true (even for relevance 1). Only set should_fetch_full = false for truly irrelevant articles:\n\n${articlesList}\n\nReturn a JSON object with analysis for each article URL.`;
     
     // Call OpenAI API with timeout (scale timeout with batch size)
     const apiStartTime = Date.now();
@@ -649,10 +652,13 @@ Return a JSON object where keys are article URLs and values are the analysis:
       let status;
       if (title_relevance === 0) {
         status = "discarded";
-      } else if (title_relevance === 1 && !should_fetch_full) {
-        status = "discarded";
       } else {
-        status = "title_filtered";
+        status = "title_filtered"; // Continue to Stage 1.5 / Stage 2 (relevance 1-3)
+      }
+      
+      // Log when discarding
+      if (status === "discarded") {
+        console.log(`[Stage1] DISCARDED id=${article.url.substring(0, 50)} title_relevance=${title_relevance} title_event_type=${title_event_type} should_fetch_full=${should_fetch_full} reason="${title_reason_short}"`);
       }
       
       // Store update data for batch update

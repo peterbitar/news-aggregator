@@ -111,3 +111,9 @@ Think of this backend as a **personal news assistant** that:
 The iOS app simply calls `/v1/feed` and receives clean, safe, personalized Signals ready to display. The system is designed to inform decisions, not recommend trades.
 
 
+
+
+
+
+
+

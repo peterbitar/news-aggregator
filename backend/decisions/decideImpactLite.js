@@ -41,7 +41,7 @@ function decideImpactLite(article) {
   
   // Event type boost (high-impact events get boost)
   const eventType = (articleRow.title_event_type || "").toLowerCase();
-  const highImpactEvents = ["earnings", "merger", "acquisition", "ipo", "bankruptcy", "lawsuit", "regulation"];
+  const highImpactEvents = ["earnings", "merger", "acquisition", "m&a", "ipo", "bankruptcy", "lawsuit", "regulation", "macro", "guidance", "product_tech", "industry_trend"];
   if (highImpactEvents.some(e => eventType.includes(e))) {
     likely_impact += 20;
   }
@@ -79,8 +79,16 @@ function decideImpactLite(article) {
   // Cap at 100
   likely_impact = Math.min(100, likely_impact);
   
+  // Determine bucket based on searched_by
+  // If searched_by is "MACRO", it's MACRO bucket; otherwise it's HOLDINGS bucket
+  const bucket = (articleRow.searched_by && articleRow.searched_by.toUpperCase() === "MACRO") ? "MACRO" : "HOLDINGS";
+
+  // Dynamic threshold: Lower for curated daily snapshot philosophy
+  // We want meaningful insights, not aggressive filtering
+  const threshold = (bucket === "HOLDINGS") ? 10 : 15;
+  
   // Decision: should we fetch full content?
-  const should_fetch = likely_impact >= PROCESS_GATE_THRESHOLD;
+  const should_fetch = likely_impact >= threshold;
   
   // Save likely_impact to database for tracking
   db.prepare(`
@@ -90,12 +98,14 @@ function decideImpactLite(article) {
     WHERE url = ?
   `).run(likely_impact, article.url);
   
-  console.log(`[decideImpactLite] ${article.url}: likely_impact=${likely_impact}, should_fetch=${should_fetch} (threshold=${PROCESS_GATE_THRESHOLD})`);
+  const decision = should_fetch ? "proceed" : "low_priority";
+  console.log(`[Stage1.5] likely_impact=${likely_impact} threshold=${threshold} bucket=${bucket} decision=${decision} id=${article.url.substring(0, 50)}`);
   
   return {
     likely_impact,
     should_fetch,
-    threshold: PROCESS_GATE_THRESHOLD,
+    threshold: threshold,
+    bucket: bucket,
   };
 }
 

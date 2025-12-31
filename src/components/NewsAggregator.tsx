@@ -1,462 +1,13 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import axios from "axios";
-import styled from "styled-components";
 import HoldingsPanel from "./HoldingsPanel";
 import TimeFilter, { TimeFilter as TimeFilterType } from "./TimeFilter";
 import SourceFilter, { SourceFilter as SourceFilterType } from "./SourceFilter";
 import ApiTestPage from "./ApiTestPage";
 import { Article, EnrichedArticle, Holding } from "../types";
-
-const Container = styled.div`
-  min-height: 100vh;
-  background-color: #f3f4f6;
-  padding: 24px;
-  max-width: 1400px;
-  margin: 0 auto;
-`;
-
-const Title = styled.h1`
-  font-size: 2rem;
-  font-weight: bold;
-  text-align: center;
-  margin-bottom: 24px;
-`;
-
-const ButtonGroup = styled.div`
-  display: flex;
-  justify-content: center;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-  gap: 8px;
-`;
-
-const TabContainer = styled.div`
-  display: flex;
-  justify-content: center;
-  margin-bottom: 24px;
-  gap: 8px;
-`;
-
-const TabButton = styled.button<{ $active?: boolean }>`
-  padding: 12px 24px;
-  border-radius: 8px;
-  color: #fff;
-  background-color: ${(props) => (props.$active ? "#2563eb" : "#6b7280")};
-  cursor: pointer;
-  transition: all 0.3s;
-  font-weight: 600;
-  font-size: 0.95rem;
-  border: none;
-  box-shadow: ${(props) => (props.$active ? "0 4px 8px rgba(37, 99, 235, 0.3)" : "0 2px 4px rgba(0, 0, 0, 0.1)")};
-
-  &:hover {
-    background-color: ${(props) => (props.$active ? "#1d4ed8" : "#4b5563")};
-    transform: translateY(-2px);
-  }
-`;
-
-const ScrapeButton = styled.button<{ $bgColor?: string }>`
-  background: ${(props) => props.$bgColor || "linear-gradient(135deg, #667eea 0%, #764ba2 100%)"};
-  color: white;
-  border: none;
-  padding: 10px 20px;
-  border-radius: 8px;
-  font-size: 0.9rem;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-
-  &:hover:not(:disabled) {
-    transform: translateY(-2px);
-    box-shadow: 0 4px 8px rgba(0, 0, 0, 0.15);
-  }
-
-  &:active:not(:disabled) {
-    transform: translateY(0);
-  }
-
-  &:disabled {
-    opacity: 0.6;
-    cursor: not-allowed;
-  }
-`;
-
-const SourceCheckboxContainer = styled.div`
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 12px;
-  background-color: #fff;
-  border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-`;
-
-const SourceCheckboxLabel = styled.label`
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  font-size: 0.9rem;
-  color: #374151;
-  user-select: none;
-
-  &:hover {
-    color: #2563eb;
-  }
-`;
-
-const SourceCheckbox = styled.input`
-  width: 18px;
-  height: 18px;
-  cursor: pointer;
-  accent-color: #2563eb;
-`;
-
-const SourceCheckboxText = styled.span`
-  font-weight: 500;
-`;
-
-const SourceLimitInput = styled.input`
-  width: 60px;
-  padding: 4px 8px;
-  border: 1px solid #d1d5db;
-  border-radius: 4px;
-  font-size: 0.875rem;
-  text-align: center;
-  margin-left: 8px;
-  
-  &:focus {
-    outline: none;
-    border-color: #2563eb;
-    box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.1);
-  }
-  
-  &:disabled {
-    background-color: #f3f4f6;
-    cursor: not-allowed;
-    opacity: 0.6;
-  }
-`;
-
-const Button = styled.button<{ $active?: boolean }>`
-  padding: 8px 16px;
-  margin: 0 8px;
-  border-radius: 8px;
-  color: #fff;
-  background-color: ${(props) => (props.$active ? "#2563eb" : "#6b7280")};
-  cursor: pointer;
-  transition: background-color 0.3s;
-
-  &:hover {
-    background-color: ${(props) => (props.$active ? "#1d4ed8" : "#4b5563")};
-  }
-`;
-
-const LoadingState = styled.p`
-  text-align: center;
-  color: #4b5563;
-`;
-const NewsGrid = styled.div`
-  display: grid;
-  grid-template-columns: repeat(1, 1fr);
-  gap: 16px;
-
-  @media (min-width: 768px) {
-    grid-template-columns: repeat(2, 1fr);
-  }
-
-  @media (min-width: 1024px) {
-    grid-template-columns: repeat(3, 1fr);
-  }
-`;
-
-const NewsCard = styled.div`
-  background-color: #fff;
-  padding: 16px;
-  border-radius: 8px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  transition: transform 0.3s, box-shadow 0.3s;
-
-  &:hover {
-    transform: scale(1.02);
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
-  }
-
-  img {
-    width: 100%;
-    height: 192px;
-    object-fit: cover;
-    border-radius: 8px;
-  }
-
-  h2 {
-    font-size: 1.25rem;
-    font-weight: bold;
-    margin-top: 8px;
-  }
-
-  p {
-    color: #4b5563;
-    font-size: 0.875rem;
-    margin-top: 4px;
-  }
-
-  a {
-    display: block;
-    margin-top: 16px;
-    color: #2563eb;
-    font-weight: bold;
-    text-decoration: none;
-
-    &:hover {
-      color: #1d4ed8;
-    }
-  }
-`;
-
-const ArticleMeta = styled.div`
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  margin-top: 8px;
-  margin-bottom: 4px;
-  flex-wrap: wrap;
-  gap: 8px;
-`;
-
-const PublicationDate = styled.span`
-  color: #6b7280;
-  font-size: 0.75rem;
-  font-weight: 500;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-`;
-
-const FeedSourceBadge = styled.span<{ $source: string }>`
-  display: inline-flex;
-  align-items: center;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 0.7rem;
-  font-weight: 600;
-  text-transform: uppercase;
-  background-color: ${(props) => {
-    if (props.$source === "gnews") return "#e0f2fe"; // Light blue for GNews
-    if (props.$source === "newsapi") return "#fef3c7"; // Light yellow for NewsAPI
-    return "#f3f4f6"; // Gray for unknown
-  }};
-  color: ${(props) => {
-    if (props.$source === "gnews") return "#0369a1"; // Dark blue
-    if (props.$source === "newsapi") return "#92400e"; // Dark yellow/brown
-    return "#6b7280"; // Gray
-  }};
-  border: 1px solid ${(props) => {
-    if (props.$source === "gnews") return "#7dd3fc";
-    if (props.$source === "newsapi") return "#fde047";
-    return "#e5e7eb";
-  }};
-`;
-
-const EnrichmentSection = styled.div`
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid #e5e7eb;
-`;
-
-const SummaryText = styled.p`
-  color: #374151;
-  font-size: 0.875rem;
-  line-height: 1.6;
-  margin: 8px 0;
-  font-style: italic;
-`;
-
-const WhyItMattersText = styled.p`
-  color: #1f2937;
-  font-size: 0.875rem;
-  line-height: 1.6;
-  margin: 8px 0;
-  font-weight: 500;
-`;
-
-const RelevanceBadges = styled.div`
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 8px;
-`;
-
-const RelevanceBadge = styled.span<{ $score: number }>`
-  display: inline-flex;
-  align-items: center;
-  padding: 4px 8px;
-  border-radius: 4px;
-  font-size: 0.75rem;
-  font-weight: 600;
-  background-color: ${(props) => {
-    if (props.$score >= 70) return "#dcfce7"; // Green for high relevance
-    if (props.$score >= 40) return "#fef3c7"; // Yellow for medium relevance
-    return "#f3f4f6"; // Gray for low relevance
-  }};
-  color: ${(props) => {
-    if (props.$score >= 70) return "#166534";
-    if (props.$score >= 40) return "#92400e";
-    return "#6b7280";
-  }};
-  border: 1px solid ${(props) => {
-    if (props.$score >= 70) return "#86efac";
-    if (props.$score >= 40) return "#fde047";
-    return "#e5e7eb";
-  }};
-`;
-
-const ToggleContainer = styled.div`
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  gap: 12px;
-  margin-bottom: 16px;
-  padding: 12px;
-  background-color: #fff;
-  border-radius: 8px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
-`;
-
-const ToggleLabel = styled.label`
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  cursor: pointer;
-  font-size: 0.875rem;
-  font-weight: 500;
-  color: #374151;
-`;
-
-const ToggleSwitch = styled.input`
-  width: 44px;
-  height: 24px;
-  border-radius: 12px;
-  background-color: #9ca3af;
-  appearance: none;
-  position: relative;
-  cursor: pointer;
-  transition: background-color 0.3s;
-
-  &:checked {
-    background-color: #2563eb;
-  }
-
-  &:before {
-    content: "";
-    position: absolute;
-    width: 20px;
-    height: 20px;
-    border-radius: 50%;
-    background-color: #fff;
-    top: 2px;
-    left: 2px;
-    transition: transform 0.3s;
-  }
-
-  &:checked:before {
-    transform: translateX(20px);
-  }
-`;
-
-const PaginationButtonsContainer = styled.div`
-  text-align: center;
-  margin-top: 20px;
-`;
-
-const PaginationButton = styled.button<{ disabled: boolean }>`
-  padding: 8px 16px;
-  margin-right: 10px;
-  border-radius: 5px;
-  border: none;
-  background: #2563eb;
-  color: #fff;
-  cursor: ${(props) => (props.disabled ? "not-allowed" : "pointer")};
-  opacity: ${(props) => (props.disabled ? 0.5 : 1)};
-`;
-
-const PaginationText = styled.span`
-  margin: 0px 10px;
-`;
-
-const SearchContainer = styled.div`
-  text-align: center;
-  margin-bottom: 16px;
-`;
-
-const SearchBox = styled.input`
-  padding: 10px;
-  width: 100%;
-  max-width: 500px;
-  border-radius: 8px;
-  border: 1px solid #d1d5db;
-  outline: none;
-  transition: border-color 0.3s;
-
-  &:focus {
-    border-color: #2563eb;
-  }
-`;
-
-// Format publication date to readable format
-const formatPublishedDate = (dateString: string): string => {
-  try {
-    const date = new Date(dateString);
-    const now = new Date();
-    const diffInSeconds = Math.floor((now.getTime() - date.getTime()) / 1000);
-
-    // Less than a minute ago
-    if (diffInSeconds < 60) {
-      return "Just now";
-    }
-
-    // Less than an hour ago
-    if (diffInSeconds < 3600) {
-      const minutes = Math.floor(diffInSeconds / 60);
-      return `${minutes} ${minutes === 1 ? "minute" : "minutes"} ago`;
-    }
-
-    // Less than 24 hours ago
-    if (diffInSeconds < 86400) {
-      const hours = Math.floor(diffInSeconds / 3600);
-      return `${hours} ${hours === 1 ? "hour" : "hours"} ago`;
-    }
-
-    // Less than 7 days ago
-    if (diffInSeconds < 604800) {
-      const days = Math.floor(diffInSeconds / 86400);
-      return `${days} ${days === 1 ? "day" : "days"} ago`;
-    }
-
-    // More than a week ago - show formatted date
-    const options: Intl.DateTimeFormatOptions = {
-      month: "short",
-      day: "numeric",
-      year: date.getFullYear() !== now.getFullYear() ? "numeric" : undefined,
-    };
-    return date.toLocaleDateString("en-US", options);
-  } catch (error) {
-    return "Unknown date";
-  }
-};
-
-const getBackendUrl = () => {
-  return process.env.NODE_ENV === "development"
-    ? "http://localhost:5001"
-    : process.env.REACT_APP_BACKEND_URL || "http://localhost:5001";
-};
+import { formatPublishedDate, getBackendUrl } from "../utils/newsAggregator.utils";
+import * as S from "./NewsAggregator.styles";
 
 const fetchNews = async ({
   queryKey,
@@ -628,8 +179,6 @@ const NewsAggregator: React.FC = () => {
     const saved = localStorage.getItem("wealthyRabbitSourceLimits");
     return saved ? JSON.parse(saved) : { newsapi: 10, gnews: 10, googlerss: 10 }; // Default: 10 per source
   });
-  const [triageLoading, setTriageLoading] = useState<boolean>(false);
-  const [enrichLoading, setEnrichLoading] = useState<boolean>(false);
   const [clearLoading, setClearLoading] = useState<boolean>(false);
   const [pipelineLoading, setPipelineLoading] = useState<boolean>(false);
   const [rankingLoading, setRankingLoading] = useState<boolean>(false);
@@ -773,45 +322,7 @@ const NewsAggregator: React.FC = () => {
     }
   }, [loading, shouldScrape, news.length]);
 
-  // Handle triage step
-  const handleTriageStep = async () => {
-    setTriageLoading(true);
-    setStepMessage("");
-    try {
-      const response = await axios.post(`${getBackendUrl()}/api/enrichment/triage`, {
-        holdings: holdingsTickers,
-        from: timeFilter.fromDate || undefined,
-        to: timeFilter.toDate || undefined,
-        sources: sourceFilter.sources && sourceFilter.sources.length > 0 ? sourceFilter.sources : undefined,
-      });
-      setStepMessage(`✅ Triage complete: ${response.data.triaged} articles analyzed, ${response.data.toEnrich} to enrich, ${response.data.filtered} filtered out`);
-      queryClient.invalidateQueries({ queryKey: ["news"] });
-    } catch (error: any) {
-      setStepMessage(`❌ Error: ${error.response?.data?.error || error.message}`);
-    } finally {
-      setTriageLoading(false);
-    }
-  };
-
-  // Handle enrichment step
-  const handleEnrichStep = async () => {
-    setEnrichLoading(true);
-    setStepMessage("");
-    try {
-      const response = await axios.post(`${getBackendUrl()}/api/enrichment/enrich`, {
-        holdings: holdingsTickers,
-        from: timeFilter.fromDate || undefined,
-        to: timeFilter.toDate || undefined,
-        sources: sourceFilter.sources && sourceFilter.sources.length > 0 ? sourceFilter.sources : undefined,
-      });
-      setStepMessage(`✅ Enrichment complete: ${response.data.enriched} articles enriched out of ${response.data.total}`);
-      queryClient.invalidateQueries({ queryKey: ["news"] });
-    } catch (error: any) {
-      setStepMessage(`❌ Error: ${error.response?.data?.error || error.message}`);
-    } finally {
-      setEnrichLoading(false);
-    }
-  };
+  // Legacy triage and enrich handlers removed - use handlePipelineProcess instead
 
   // Handle clear database
   const handleClearDatabase = async () => {
@@ -837,14 +348,21 @@ const NewsAggregator: React.FC = () => {
       setStepMessage(`❌ Error: Please add holdings first before processing articles`);
       return;
     }
-    
+
     setPipelineLoading(true);
     setStepMessage("");
     try {
-      const response = await axios.post(`${getBackendUrl()}/api/articles/process`, {
-        holdings: holdingsTickers, // Backend expects array of ticker strings
-        userProfile: "balanced",
-      });
+      const response = await axios.post(`${getBackendUrl()}/internal/process`,
+        {
+          limit: 50,
+          userProfile: "balanced",
+        },
+        {
+          headers: {
+            'x-internal-key': process.env.REACT_APP_INTERNAL_API_KEY || ''
+          }
+        }
+      );
       setStepMessage(`✅ Pipeline processing complete: ${response.data.processed || 0} articles processed through Stages 1-4`);
       queryClient.invalidateQueries({ queryKey: ["news"] });
     } catch (error: any) {
@@ -859,9 +377,17 @@ const NewsAggregator: React.FC = () => {
     setRankingLoading(true);
     setStepMessage("");
     try {
-      const response = await axios.post(`${getBackendUrl()}/api/articles/rank`, {
-        cutoffScore: 50,
-      });
+      const response = await axios.post(`${getBackendUrl()}/internal/rank`,
+        {
+          cutoffScore: 50,
+          limit: 50,
+        },
+        {
+          headers: {
+            'x-internal-key': process.env.REACT_APP_INTERNAL_API_KEY || ''
+          }
+        }
+      );
       setStepMessage(`✅ Ranking complete: Articles ranked and clustered`);
       queryClient.invalidateQueries({ queryKey: ["news"] });
     } catch (error: any) {
@@ -884,29 +410,29 @@ const NewsAggregator: React.FC = () => {
   }
 
   return (
-    <Container>
-      <Title>🐰 Wealthy Rabbit</Title>
+    <S.Container>
+      <S.Title>🐰 Wealthy Rabbit</S.Title>
       <div style={{ textAlign: "center", marginBottom: "16px" }}>
-        <ScrapeButton
+        <S.ScrapeButton
           onClick={() => setShowApiTestPage(true)}
           $bgColor="#6366f1"
           style={{ margin: "0 auto" }}
         >
           🧪 Test /api/articles Endpoint
-        </ScrapeButton>
+        </S.ScrapeButton>
       </div>
       <HoldingsPanel />
-      <TabContainer>
-        <TabButton $active={viewMode === "all"} onClick={() => handleViewModeChange("all")}>
+      <S.TabContainer>
+        <S.TabButton $active={viewMode === "all"} onClick={() => handleViewModeChange("all")}>
           📰 All News
-        </TabButton>
-        <TabButton $active={viewMode === "feed"} onClick={() => handleViewModeChange("feed")}>
+        </S.TabButton>
+        <S.TabButton $active={viewMode === "feed"} onClick={() => handleViewModeChange("feed")}>
           ⭐ My Feed
-        </TabButton>
-        <TabButton $active={viewMode === "discarded"} onClick={() => handleViewModeChange("discarded")}>
+        </S.TabButton>
+        <S.TabButton $active={viewMode === "discarded"} onClick={() => handleViewModeChange("discarded")}>
           🗑️ Discarded
-        </TabButton>
-      </TabContainer>
+        </S.TabButton>
+      </S.TabContainer>
       {viewMode === "feed" && (
         <div style={{ 
           padding: "12px", 
@@ -936,14 +462,14 @@ const NewsAggregator: React.FC = () => {
         </div>
       )}
       {viewMode === "all" && (
-        <SearchContainer>
-        <SearchBox
+        <S.SearchContainer>
+        <S.SearchBox
           type="text"
           placeholder="Search for news..."
           value={searchTerm}
           onChange={handleSearchChange}
         />
-        </SearchContainer>
+        </S.SearchContainer>
       )}
       {viewMode === "all" && (
         <>
@@ -965,11 +491,11 @@ const NewsAggregator: React.FC = () => {
       )}
       {viewMode === "all" && (
         <>
-          <SourceCheckboxContainer>
+          <S.SourceCheckboxContainer>
             <span style={{ fontWeight: 600, color: "#374151", marginRight: "8px" }}>Scrape from:</span>
             <span style={{ fontSize: "0.75rem", color: "#6b7280", marginLeft: "auto" }}>Max articles per source:</span>
-            <SourceCheckboxLabel>
-              <SourceCheckbox
+            <S.SourceCheckboxLabel>
+              <S.SourceCheckbox
                 type="checkbox"
                 checked={selectedSources.includes('newsapi')}
                 onChange={(e) => {
@@ -980,8 +506,8 @@ const NewsAggregator: React.FC = () => {
                   localStorage.setItem("wealthyRabbitSelectedSources", JSON.stringify(newSources));
                 }}
               />
-              <SourceCheckboxText>NewsAPI</SourceCheckboxText>
-              <SourceLimitInput
+              <S.SourceCheckboxText>NewsAPI</S.SourceCheckboxText>
+              <S.SourceLimitInput
                 type="number"
                 min="1"
                 max="100"
@@ -995,9 +521,9 @@ const NewsAggregator: React.FC = () => {
                 }}
                 title="Max articles from NewsAPI"
               />
-            </SourceCheckboxLabel>
-            <SourceCheckboxLabel>
-              <SourceCheckbox
+            </S.SourceCheckboxLabel>
+            <S.SourceCheckboxLabel>
+              <S.SourceCheckbox
                 type="checkbox"
                 checked={selectedSources.includes('gnews')}
                 onChange={(e) => {
@@ -1008,8 +534,8 @@ const NewsAggregator: React.FC = () => {
                   localStorage.setItem("wealthyRabbitSelectedSources", JSON.stringify(newSources));
                 }}
               />
-              <SourceCheckboxText>GNews</SourceCheckboxText>
-              <SourceLimitInput
+              <S.SourceCheckboxText>GNews</S.SourceCheckboxText>
+              <S.SourceLimitInput
                 type="number"
                 min="1"
                 max="100"
@@ -1023,9 +549,9 @@ const NewsAggregator: React.FC = () => {
                 }}
                 title="Max articles from GNews"
               />
-            </SourceCheckboxLabel>
-            <SourceCheckboxLabel>
-              <SourceCheckbox
+            </S.SourceCheckboxLabel>
+            <S.SourceCheckboxLabel>
+              <S.SourceCheckbox
                 type="checkbox"
                 checked={selectedSources.includes('googlerss')}
                 onChange={(e) => {
@@ -1036,8 +562,8 @@ const NewsAggregator: React.FC = () => {
                   localStorage.setItem("wealthyRabbitSelectedSources", JSON.stringify(newSources));
                 }}
               />
-              <SourceCheckboxText>Google RSS</SourceCheckboxText>
-              <SourceLimitInput
+              <S.SourceCheckboxText>Google RSS</S.SourceCheckboxText>
+              <S.SourceLimitInput
                 type="number"
                 min="1"
                 max="100"
@@ -1051,10 +577,10 @@ const NewsAggregator: React.FC = () => {
                 }}
                 title="Max articles from Google RSS"
               />
-            </SourceCheckboxLabel>
-          </SourceCheckboxContainer>
+            </S.SourceCheckboxLabel>
+          </S.SourceCheckboxContainer>
           <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "16px", flexWrap: "wrap" }}>
-            <ScrapeButton
+            <S.ScrapeButton
               onClick={async () => {
                 console.log("[ScrapeButton] Clicked - directly calling API with scrape=true");
                 console.log("[ScrapeButton] Selected sources:", selectedSources);
@@ -1142,7 +668,7 @@ const NewsAggregator: React.FC = () => {
             disabled={loading}
           >
             {loading ? "⏳ Scraping..." : "🔄 Scrape New Articles"}
-          </ScrapeButton>
+          </S.ScrapeButton>
           {scrapedArticleCount !== null && (
             <span style={{ color: "#10b981", fontSize: "0.875rem", fontWeight: "600" }}>
               ✅ Scraped {scrapedArticleCount} article{scrapedArticleCount !== 1 ? "s" : ""}
@@ -1161,20 +687,20 @@ const NewsAggregator: React.FC = () => {
         <div style={{ width: "100%", marginBottom: "8px", fontSize: "0.875rem", fontWeight: "600", color: "#0369a1" }}>
           🔄 Full Pipeline Processing (5 Stages)
         </div>
-        <ScrapeButton
+        <S.ScrapeButton
           onClick={handlePipelineProcess}
-          disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
+          disabled={clearLoading || pipelineLoading || rankingLoading}
           $bgColor="#8b5cf6"
         >
           {pipelineLoading ? "⏳ Processing..." : "🚀 Run Full Pipeline (Stages 1-4)"}
-        </ScrapeButton>
-        <ScrapeButton
+        </S.ScrapeButton>
+        <S.ScrapeButton
           onClick={handleRanking}
-          disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
+          disabled={clearLoading || pipelineLoading || rankingLoading}
           $bgColor="#f59e0b"
         >
           {rankingLoading ? "⏳ Ranking..." : "📊 Stage 5: Ranking & Clustering"}
-        </ScrapeButton>
+        </S.ScrapeButton>
         {stepMessage && (
           <span style={{ color: stepMessage.includes("✅") ? "#10b981" : "#ef4444", fontSize: "0.875rem", marginLeft: "8px" }}>
             {stepMessage}
@@ -1188,48 +714,34 @@ const NewsAggregator: React.FC = () => {
       {/* Show individual step buttons only when enriched mode is on and holdings exist */}
       {holdings.length > 0 && useEnriched && (
         <div style={{ display: "flex", alignItems: "center", gap: "12px", marginBottom: "16px", flexWrap: "wrap", padding: "12px", backgroundColor: "#fff", borderRadius: "8px", boxShadow: "0 2px 4px rgba(0, 0, 0, 0.05)" }}>
-          <ScrapeButton
-            onClick={handleTriageStep}
-            disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
-            $bgColor="#10b981"
-          >
-            {triageLoading ? "⏳ Triaging..." : "🔍 Step 1: Triage Articles"}
-          </ScrapeButton>
-          <ScrapeButton
-            onClick={handleEnrichStep}
-            disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
-            $bgColor="#3b82f6"
-          >
-            {enrichLoading ? "⏳ Enriching..." : "✨ Step 2: Enrich Articles"}
-          </ScrapeButton>
-          <ScrapeButton
+          <S.ScrapeButton
             onClick={handleClearDatabase}
-            disabled={triageLoading || enrichLoading || clearLoading || pipelineLoading || rankingLoading}
+            disabled={clearLoading || pipelineLoading || rankingLoading}
             $bgColor="#ef4444"
           >
             {clearLoading ? "⏳ Clearing..." : "🗑️ Clear Database"}
-          </ScrapeButton>
+          </S.ScrapeButton>
         </div>
       )}
       {viewMode === "all" && (
-        <ButtonGroup>
+        <S.ButtonGroup>
           {[
             "business",
             "technology",
             "general",
           ].map((cat) => (
-            <Button
+            <S.Button
               key={cat}
               onClick={() => handleCategoryButtonClick(cat)}
               $active={category === cat}
             >
               {cat.charAt(0).toUpperCase() + cat.slice(1)}
-            </Button>
+            </S.Button>
           ))}
-        </ButtonGroup>
+        </S.ButtonGroup>
       )}
       {error ? (
-        <LoadingState style={{ padding: "16px", backgroundColor: "#fee2e2", borderRadius: "8px", color: "#991b1b" }}>
+        <S.LoadingState style={{ padding: "16px", backgroundColor: "#fee2e2", borderRadius: "8px", color: "#991b1b" }}>
           ⚠️ Error: {error.message}
           {axios.isAxiosError(error) && error.response?.data?.error && (
             <div style={{ marginTop: "8px", fontSize: "0.875rem" }}>
@@ -1241,9 +753,9 @@ const NewsAggregator: React.FC = () => {
               {error.response.data.message}
             </div>
           )}
-        </LoadingState>
+        </S.LoadingState>
       ) : loading ? (
-        <LoadingState>Loading news...</LoadingState>
+        <S.LoadingState>Loading news...</S.LoadingState>
       ) : news.length === 0 ? (
         <div style={{ 
           padding: "24px", 
@@ -1294,7 +806,7 @@ const NewsAggregator: React.FC = () => {
         </div>
       ) : (
         <>
-          <NewsGrid>
+          <S.NewsGrid>
             {news.map((article: Article | EnrichedArticle, index: number) => {
               const isEnriched = "summary" in article && "relevanceScores" in article;
               const enrichedArticle = isEnriched ? (article as EnrichedArticle) : null;
@@ -1308,29 +820,29 @@ const NewsAggregator: React.FC = () => {
                 : [];
 
               return (
-                <NewsCard key={`${article.url}-${index}`}>
+                <S.NewsCard key={`${article.url}-${index}`}>
                   {article.urlToImage && (
                     <img src={article.urlToImage} alt={article.title} />
                   )}
                   <h2>{article.title}</h2>
-                  <ArticleMeta>
+                  <S.ArticleMeta>
                     <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap" }}>
                       <p style={{ margin: 0 }}>{article.source.name}</p>
                       {article.feedSource && (
-                        <FeedSourceBadge $source={article.feedSource}>
+                        <S.FeedSourceBadge $source={article.feedSource}>
                           {article.feedSource === "gnews" ? "📰 GNews" : article.feedSource === "newsapi" ? "📡 NewsAPI" : article.feedSource}
-                        </FeedSourceBadge>
+                        </S.FeedSourceBadge>
                       )}
                     </div>
                     {article.publishedAt && (
-                      <PublicationDate>
+                      <S.PublicationDate>
                         🕐 {formatPublishedDate(article.publishedAt)}
-                      </PublicationDate>
+                      </S.PublicationDate>
                     )}
-                  </ArticleMeta>
+                  </S.ArticleMeta>
                   
                   {viewMode === "discarded" && article.discardReason && (
-                    <EnrichmentSection>
+                    <S.EnrichmentSection>
                       <div style={{ 
                         padding: "12px", 
                         backgroundColor: "#fef2f2", 
@@ -1370,64 +882,64 @@ const NewsAggregator: React.FC = () => {
                           </div>
                         )}
                       </div>
-                    </EnrichmentSection>
+                    </S.EnrichmentSection>
                   )}
                   
                   {enrichedArticle?.summary && (
-                    <EnrichmentSection>
-                      <SummaryText>
+                    <S.EnrichmentSection>
+                      <S.SummaryText>
                         <strong>📝 Summary:</strong> {enrichedArticle.summary}
-                      </SummaryText>
-                    </EnrichmentSection>
+                      </S.SummaryText>
+                    </S.EnrichmentSection>
                   )}
                   
                   <p>{article.description}</p>
                   
                   {enrichedArticle?.whyItMatters && (
-                    <EnrichmentSection>
-                      <WhyItMattersText>
+                    <S.EnrichmentSection>
+                      <S.WhyItMattersText>
                         <strong>💡 Why this matters:</strong> {enrichedArticle.whyItMatters}
-                      </WhyItMattersText>
-                    </EnrichmentSection>
+                      </S.WhyItMattersText>
+                    </S.EnrichmentSection>
                   )}
                   
                   {topRelevanceScores.length > 0 && (
-                    <EnrichmentSection>
-                      <RelevanceBadges>
+                    <S.EnrichmentSection>
+                      <S.RelevanceBadges>
                         {topRelevanceScores.map(([ticker, score]) => (
-                          <RelevanceBadge key={ticker} $score={score}>
+                          <S.RelevanceBadge key={ticker} $score={score}>
                             {ticker}: {score}%
-                          </RelevanceBadge>
+                          </S.RelevanceBadge>
                         ))}
-                      </RelevanceBadges>
-                    </EnrichmentSection>
+                      </S.RelevanceBadges>
+                    </S.EnrichmentSection>
                   )}
                   
                   <a href={article.url} target="_blank" rel="noopener noreferrer">
                     Read more
                   </a>
-                </NewsCard>
+                </S.NewsCard>
               );
             })}
-          </NewsGrid>
-          <PaginationButtonsContainer>
-            <PaginationButton
+          </S.NewsGrid>
+          <S.PaginationButtonsContainer>
+            <S.PaginationButton
               disabled={currentPage === 1} // Disable "Previous" on first page
               onClick={handlePrevPage}
             >
               Previous
-            </PaginationButton>
-            <PaginationText>Page {currentPage}</PaginationText>
-            <PaginationButton
+            </S.PaginationButton>
+            <S.PaginationText>Page {currentPage}</S.PaginationText>
+            <S.PaginationButton
               disabled={news.length === 0} // Disable "Next" when no more results
               onClick={handleNextPage}
             >
               Next
-            </PaginationButton>
-          </PaginationButtonsContainer>
+            </S.PaginationButton>
+          </S.PaginationButtonsContainer>
         </>
       )}
-    </Container>
+    </S.Container>
   );
 };
 

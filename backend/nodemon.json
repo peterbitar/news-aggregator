@@ -1,0 +1,26 @@
+{
+  "watch": [
+    "server.js",
+    "admin",
+    "background",
+    "core",
+    "data",
+    "decisions",
+    "integrations",
+    "pipeline",
+    "product"
+  ],
+  "ignore": [
+    "node_modules",
+    "**/*.db",
+    "**/*.sqlite",
+    "**/*.log",
+    "tmp",
+    "cache",
+    "logs",
+    ".git"
+  ],
+  "ext": "js,json",
+  "delay": 2000
+}
+

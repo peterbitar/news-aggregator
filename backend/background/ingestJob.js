@@ -3,10 +3,16 @@
  * Fetches news articles from external APIs and saves them to the database
  */
 
-const { fetchNewsFromMultipleSources, fetchArticlesForHoldings } = require("../integrations/newsProviders");
+const { fetchNewsFromMultipleSources, fetchArticlesForHoldings, resetGNewsRateLimit } = require("../integrations/newsProviders");
 const { getDatabase } = require("../data/db");
 
 const DEFAULT_USER_ID = 1;
+
+// Detect dev mode
+const isDev = process.env.NODE_ENV !== 'production';
+
+// Single-flight lock to prevent overlapping runs
+let isRunning = false;
 
 /**
  * Run the ingest job
@@ -15,7 +21,19 @@ const DEFAULT_USER_ID = 1;
  * 2. MACRO BUCKET: Broad financial/market news (always fetched)
  */
 async function runIngest() {
+  // Check if already running
+  if (isRunning) {
+    console.log("[Ingest Job] Skipped: already running");
+    return 0;
+  }
+
+  // Acquire lock
+  isRunning = true;
   console.log("[Ingest Job] Starting two-bucket ingestion...");
+  
+  // Reset GNews rate limit at start of each run
+  resetGNewsRateLimit();
+  
   try {
     const db = getDatabase();
     const holdings = db.prepare(`
@@ -27,8 +45,12 @@ async function runIngest() {
     // BUCKET 1: Holdings-specific news (targeted)
     if (holdings.length > 0) {
       console.log(`[Ingest Job] BUCKET 1: Fetching targeted news for ${holdings.length} holdings`);
+      // Dev mode: use lower limits (2-3 per source)
+      const holdingsSourceLimits = isDev 
+        ? { newsapi: 3, gnews: 2, googlerss: 3 }
+        : { newsapi: 5, gnews: 5, googlerss: 5 };
       const holdingsArticles = await fetchArticlesForHoldings(holdings, {
-        sourceLimits: { newsapi: 5, gnews: 5, googlerss: 5 }, // Smaller limits for targeted
+        sourceLimits: holdingsSourceLimits,
       });
       allArticles.push(...holdingsArticles);
       console.log(`[Ingest Job] BUCKET 1: Fetched ${holdingsArticles.length} holdings-specific articles`);
@@ -38,7 +60,9 @@ async function runIngest() {
 
     // BUCKET 2: Macro/market news (event-driven, always fetched)
     console.log(`[Ingest Job] BUCKET 2: Fetching event-driven macro/market news`);
-    const macroQueries = [
+    
+    // Dev mode: use fewer macro queries (3-4 instead of 12)
+    const allMacroQueries = [
       "CPI inflation surprise",
       "Federal Reserve rate decision",
       "bond yields spike",
@@ -53,25 +77,49 @@ async function runIngest() {
       "housing market crash"
     ];
     
-    // Hard cap: max 100 total macro headlines per run
-    const MACRO_CAP = 100;
+    // In dev, use only first 3-4 queries to reduce load
+    const macroQueries = isDev 
+      ? allMacroQueries.slice(0, 3)
+      : allMacroQueries;
+    
+    console.log(`[Ingest Job] BUCKET 2: Using ${macroQueries.length} macro queries${isDev ? ' (dev mode: reduced)' : ''}`);
+    
+    // Hard cap: max 100 total macro headlines per run (production), 30 in dev
+    const MACRO_CAP = isDev ? 30 : 100;
     const articlesPerQuery = Math.ceil(MACRO_CAP / macroQueries.length);
-    const sourceLimitsPerQuery = {
-      newsapi: Math.min(articlesPerQuery, 10),
-      gnews: Math.min(articlesPerQuery, 10),
-      googlerss: Math.min(articlesPerQuery, 10)
-    };
+    
+    // Dev mode: lower per-source limits (2-3 instead of 10)
+    const sourceLimitsPerQuery = isDev
+      ? {
+          newsapi: Math.min(articlesPerQuery, 3),
+          gnews: Math.min(articlesPerQuery, 2),
+          googlerss: Math.min(articlesPerQuery, 3)
+        }
+      : {
+          newsapi: Math.min(articlesPerQuery, 10),
+          gnews: Math.min(articlesPerQuery, 10),
+          googlerss: Math.min(articlesPerQuery, 10)
+        };
+    
+    console.log(`[Ingest Job] BUCKET 2: Source limits per query:`, sourceLimitsPerQuery);
     
     // Fetch from multiple macro topics (limit per topic to control cost)
-    const macroPromises = macroQueries.map(query => 
-      fetchNewsFromMultipleSources(query, {
+    // Add delay between queries in dev mode to avoid rate limits
+    const macroResults = [];
+    for (let i = 0; i < macroQueries.length; i++) {
+      const query = macroQueries[i];
+      if (i > 0 && isDev) {
+        // Add 1 second delay between queries in dev mode
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      const articles = await fetchNewsFromMultipleSources(query, {
         category: "business",
         sourceLimits: sourceLimitsPerQuery,
         searchedBy: "MACRO", // Tag as macro news
-      })
-    );
+      });
+      macroResults.push(articles);
+    }
     
-    const macroResults = await Promise.all(macroPromises);
     let macroArticles = macroResults.flat();
     
     // Enforce hard cap: take first 100 articles
@@ -92,6 +140,9 @@ async function runIngest() {
   } catch (error) {
     console.error("[Ingest Job] Error:", error.message);
     return 0;
+  } finally {
+    // Release lock
+    isRunning = false;
   }
 }
 

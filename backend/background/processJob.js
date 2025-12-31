@@ -8,12 +8,24 @@ const articlePipeline = require("../pipeline/articlePipeline");
 
 const DEFAULT_USER_ID = 1;
 
+// Single-flight lock to prevent overlapping runs
+let isRunning = false;
+
 /**
  * Run the process job
  * Processes pending articles through pipeline stages 1-4
  */
 async function runProcess() {
+  // Check if already running
+  if (isRunning) {
+    console.log("[Process Job] Skipped: already running");
+    return 0;
+  }
+
+  // Acquire lock
+  isRunning = true;
   console.log("[Process Job] Starting...");
+  
   try {
     const db = getDatabase();
     const holdings = db.prepare(`
@@ -65,6 +77,9 @@ async function runProcess() {
   } catch (error) {
     console.error("[Process Job] Error:", error.message);
     return 0;
+  } finally {
+    // Release lock
+    isRunning = false;
   }
 }
 

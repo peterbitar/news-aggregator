@@ -6,12 +6,24 @@
 const { getDatabase } = require("../data/db");
 const { processRankingClustering } = require("../pipeline/stage5_rankingClustering");
 
+// Single-flight lock to prevent overlapping runs
+let isRunning = false;
+
 /**
  * Run the rank job
  * Ranks and clusters personalized articles
  */
 async function runRank() {
+  // Check if already running
+  if (isRunning) {
+    console.log("[Rank Job] Skipped: already running");
+    return 0;
+  }
+
+  // Acquire lock
+  isRunning = true;
   console.log("[Rank Job] Starting...");
+  
   try {
     const db = getDatabase();
     
@@ -38,6 +50,9 @@ async function runRank() {
   } catch (error) {
     console.error("[Rank Job] Error:", error.message);
     return 0;
+  } finally {
+    // Release lock
+    isRunning = false;
   }
 }
 

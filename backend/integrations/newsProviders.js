@@ -4,6 +4,36 @@ const xml2js = require("xml2js");
 const { promisify } = require("util");
 const parseXML = promisify(xml2js.parseString);
 
+// Rate limiting and backoff for GNews
+let gnewsRateLimited = false;
+let gnewsBackoffDelay = 1000; // Start with 1 second delay
+const MAX_BACKOFF_DELAY = 60000; // Max 60 seconds
+
+// Detect dev mode
+const isDev = process.env.NODE_ENV !== 'production';
+
+/**
+ * Sleep/delay utility
+ */
+function delay(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+/**
+ * Reset GNews rate limit status (call at start of new ingestion run)
+ */
+function resetGNewsRateLimit() {
+  gnewsRateLimited = false;
+  gnewsBackoffDelay = 1000; // Reset to initial delay
+}
+
+/**
+ * Check if GNews is rate-limited
+ */
+function isGNewsRateLimited() {
+  return gnewsRateLimited;
+}
+
 /**
  * Transform GNews article to standard Article format
  */
@@ -44,111 +74,126 @@ function transformNewsAPIArticle(newsapiArticle) {
   };
 }
 
+// ========== Google RSS Helper Functions ==========
+
+/**
+ * Extract field from RSS item that might be array or string format
+ */
+function extractRSSField(field, defaultValue = "") {
+  if (!field) return defaultValue;
+
+  if (Array.isArray(field)) {
+    return field[0]?._ || field[0] || defaultValue;
+  }
+
+  return field || defaultValue;
+}
+
+/**
+ * Extract source name from RSS item using multiple strategies
+ */
+function extractRSSSourceName(rssItem, description) {
+  // Method 1: Check source tag
+  if (rssItem.source) {
+    const source = Array.isArray(rssItem.source) ? rssItem.source[0] : rssItem.source;
+    if (source?._) return source._;
+    if (typeof source === 'string') return source;
+
+    // Extract domain from source URL
+    if (source?.$?.url) {
+      try {
+        const url = new URL(source.$.url);
+        return url.hostname.replace('www.', '');
+      } catch (e) {
+        // Continue to next method
+      }
+    }
+  }
+
+  // Method 2: Check dc:creator
+  if (rssItem["dc:creator"]) {
+    const creator = Array.isArray(rssItem["dc:creator"])
+      ? rssItem["dc:creator"][0]
+      : rssItem["dc:creator"];
+    if (creator?._) return creator._;
+    if (typeof creator === 'string') return creator;
+  }
+
+  // Method 3: Extract from description (often contains source info)
+  if (description) {
+    const sourceMatch = description.match(/(?:Source|via|from|by):\s*([^<\.]+)/i);
+    if (sourceMatch && sourceMatch[1]) {
+      return sourceMatch[1].trim();
+    }
+  }
+
+  return "Google News"; // Default fallback
+}
+
+/**
+ * Extract image URL from RSS description
+ */
+function extractRSSImageUrl(description) {
+  if (!description) return null;
+
+  const imgMatch = description.match(/<img[^>]+src=["']([^"']+)["']/i);
+  return imgMatch ? imgMatch[1] : null;
+}
+
+/**
+ * Clean HTML from description
+ */
+function cleanHTMLDescription(description) {
+  if (!description) return null;
+
+  return description
+    .replace(/<[^>]+>/g, '') // Remove HTML tags
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .trim();
+}
+
+/**
+ * Parse RSS date string to ISO format
+ */
+function parseRSSDate(rssItem) {
+  if (!rssItem.pubDate) return new Date().toISOString();
+
+  const dateStr = extractRSSField(rssItem.pubDate);
+  if (!dateStr) return new Date().toISOString();
+
+  try {
+    const parsedDate = new Date(dateStr);
+    if (!isNaN(parsedDate.getTime())) {
+      return parsedDate.toISOString();
+    }
+  } catch (e) {
+    // Keep default date if parsing fails
+  }
+
+  return new Date().toISOString();
+}
+
+// =================================================
+
 /**
  * Transform Google RSS article to standard Article format
  * Handles various RSS XML structures from Google News
  */
 function transformGoogleRSSArticle(rssItem) {
-  // Extract title - handle both array and string formats
-  const title = Array.isArray(rssItem.title) 
-    ? (rssItem.title[0]?._ || rssItem.title[0] || "") 
-    : (rssItem.title || "");
-  
-  // Extract link - handle both array and string formats
-  const link = Array.isArray(rssItem.link) 
-    ? (rssItem.link[0]?._ || rssItem.link[0] || rssItem.link[0]?.$?.href || "") 
-    : (rssItem.link || "");
-  
-  // Extract description - handle both array and string formats
-  let description = null;
-  if (rssItem.description) {
-    description = Array.isArray(rssItem.description)
-      ? (rssItem.description[0]?._ || rssItem.description[0] || "")
-      : rssItem.description;
-  }
-  
-  // Extract published date - handle various formats
-  let pubDate = new Date().toISOString();
-  if (rssItem.pubDate) {
-    const dateStr = Array.isArray(rssItem.pubDate) 
-      ? (rssItem.pubDate[0]?._ || rssItem.pubDate[0] || "")
-      : rssItem.pubDate;
-    
-    if (dateStr) {
-      try {
-        const parsedDate = new Date(dateStr);
-        if (!isNaN(parsedDate.getTime())) {
-          pubDate = parsedDate.toISOString();
-        }
-      } catch (e) {
-        // Keep default date if parsing fails
-      }
-    }
-  }
-  
-  // Extract source name - try multiple methods
-  let sourceName = "Google News";
-  
-  // Method 1: Check source tag
-  if (rssItem.source) {
-    const source = Array.isArray(rssItem.source) ? rssItem.source[0] : rssItem.source;
-    if (source?._) {
-      sourceName = source._;
-    } else if (typeof source === 'string') {
-      sourceName = source;
-    } else if (source?.$?.url) {
-      // Extract domain from source URL
-      try {
-        const url = new URL(source.$.url);
-        sourceName = url.hostname.replace('www.', '');
-      } catch (e) {
-        // Keep default
-      }
-    }
-  }
-  
-  // Method 2: Check dc:creator
-  if (sourceName === "Google News" && rssItem["dc:creator"]) {
-    const creator = Array.isArray(rssItem["dc:creator"]) 
-      ? rssItem["dc:creator"][0] 
-      : rssItem["dc:creator"];
-    if (creator?._) {
-      sourceName = creator._;
-    } else if (typeof creator === 'string') {
-      sourceName = creator;
-    }
-  }
-  
-  // Method 3: Try to extract from description (often contains source info)
-  if (sourceName === "Google News" && description) {
-    // Look for patterns like "Source: ..." or "via ..." or "from ..."
-    const sourceMatch = description.match(/(?:Source|via|from|by):\s*([^<\.]+)/i);
-    if (sourceMatch && sourceMatch[1]) {
-      sourceName = sourceMatch[1].trim();
-    }
-  }
-  
-  // Extract image URL if available (Google RSS sometimes includes it in description)
-  let imageUrl = null;
-  if (description) {
-    const imgMatch = description.match(/<img[^>]+src=["']([^"']+)["']/i);
-    if (imgMatch && imgMatch[1]) {
-      imageUrl = imgMatch[1];
-    }
-  }
-  
-  // Clean description of HTML tags for better storage
-  let cleanDescription = description;
-  if (description) {
-    cleanDescription = description
-      .replace(/<[^>]+>/g, '') // Remove HTML tags
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&quot;/g, '"')
-      .trim();
-  }
+  // Extract basic fields using helper
+  const title = extractRSSField(rssItem.title);
+  const link = extractRSSField(rssItem.link);
+  const rawDescription = extractRSSField(rssItem.description);
+
+  // Extract metadata using helpers
+  const sourceName = extractRSSSourceName(rssItem, rawDescription);
+  const imageUrl = extractRSSImageUrl(rawDescription);
+  const cleanDescription = cleanHTMLDescription(rawDescription);
+  const pubDate = parseRSSDate(rssItem);
 
   return {
     source: {
@@ -388,16 +433,30 @@ async function fetchFromGoogleRSS(query, options = {}) {
 
 /**
  * Fetch news from GNews.io
+ * Implements rate limiting, exponential backoff, and dev mode limits
  */
 async function fetchFromGNews(query, options = {}) {
   const { category, page = 1, from, to, maxArticles = 10 } = options;
   const API_KEY = process.env.GNEWS_API_KEY;
   
-  console.log(`[GNews] Fetching articles - query: "${query}", category: ${category}, page: ${page}`);
+  // Check if GNews is rate-limited (skip for rest of run)
+  if (gnewsRateLimited) {
+    console.log(`[GNews] Skipped: rate-limited (disabled for this run)`);
+    return [];
+  }
 
   if (!API_KEY) {
     console.warn("GNEWS_API_KEY not configured, skipping GNews");
     return [];
+  }
+
+  // Add delay before request (rate limiting)
+  if (gnewsBackoffDelay > 1000) {
+    console.log(`[GNews] Waiting ${gnewsBackoffDelay}ms before request (backoff delay)`);
+    await delay(gnewsBackoffDelay);
+  } else {
+    // Small delay between requests even when not backing off
+    await delay(500);
   }
 
   try {
@@ -433,6 +492,9 @@ async function fetchFromGNews(query, options = {}) {
       timeout: 10000,
     });
 
+    // Success - reset backoff delay
+    gnewsBackoffDelay = 1000;
+
     if (response.data && response.data.articles) {
       const articles = response.data.articles.map(transformGNewsArticle);
       console.log(`[GNews] API returned ${articles.length} articles`);
@@ -442,8 +504,27 @@ async function fetchFromGNews(query, options = {}) {
     console.log(`[GNews] No articles in response`);
     return [];
   } catch (error) {
-    // Truncate error output to avoid CSS/HTML noise
+    // Check for rate limit errors
+    const statusCode = error.response?.status;
     const errorData = error.response?.data;
+    
+    // GNews rate limit typically returns 429 or 403
+    if (statusCode === 429 || statusCode === 403 || 
+        (errorData && (errorData.message?.toLowerCase().includes('rate limit') || 
+                       errorData.error?.toLowerCase().includes('rate limit')))) {
+      console.error(`[GNews] Rate limit detected (status: ${statusCode}). Disabling GNews for rest of run.`);
+      gnewsRateLimited = true;
+      return [];
+    }
+
+    // For other errors, implement exponential backoff
+    if (statusCode >= 500 || statusCode === 429) {
+      // Exponential backoff: double the delay, cap at max
+      gnewsBackoffDelay = Math.min(gnewsBackoffDelay * 2, MAX_BACKOFF_DELAY);
+      console.warn(`[GNews] Server error (${statusCode}), increasing backoff delay to ${gnewsBackoffDelay}ms`);
+    }
+
+    // Truncate error output to avoid CSS/HTML noise
     const errorMsg = typeof errorData === 'string' && errorData.length > 500 
       ? errorData.substring(0, 200) + '... (truncated)' 
       : errorData;
@@ -544,37 +625,6 @@ function deduplicateArticles(articles) {
   }
 
   return unique;
-}
-
-/**
- * Deduplicate articles by URL, preserving search context
- * If an article appears multiple times (found by different tickers), combine the search contexts
- */
-function deduplicateArticlesWithSearchContext(articles) {
-  const articleMap = new Map();
-  
-  for (const article of articles) {
-    const url = article.url;
-    if (!url) continue;
-    
-    if (articleMap.has(url)) {
-      // Article already seen - merge search contexts
-      const existing = articleMap.get(url);
-      const existingSearchedBy = existing.searchedBy || "";
-      const newSearchedBy = article.searchedBy || "";
-      
-      // Combine searched_by values (comma-separated if different)
-      if (newSearchedBy && !existingSearchedBy.includes(newSearchedBy)) {
-        existing.searchedBy = existingSearchedBy 
-          ? `${existingSearchedBy},${newSearchedBy}`
-          : newSearchedBy;
-      }
-    } else {
-      articleMap.set(url, { ...article });
-    }
-  }
-  
-  return Array.from(articleMap.values());
 }
 
 /**
@@ -764,28 +814,34 @@ async function fetchArticlesForHoldings(holdings, options = {}) {
 
   const { page = 1, from, to, sources, sourceLimits } = options;
 
-  // Build search queries for each holding
-  // Format: "NVDA OR Nvidia" for ticker + label
+  // Build contextual search queries for each holding
+  // Philosophy: Add financial/business context to filter out noise
+  // Examples: "AAPL" matches "Apple TV show" → Add "stock OR earnings OR revenue"
   const searchQueries = holdings.map((holding) => {
     const ticker = holding.ticker ? holding.ticker.toUpperCase() : holding.toUpperCase();
-    const parts = [ticker];
-    
-    // If holding is an object, add label and notes
-    if (typeof holding === 'object' && holding.label) {
-      parts.push(holding.label);
+    const label = typeof holding === 'object' && holding.label ? holding.label : '';
+
+    // Build base query with ticker and label
+    const baseParts = [ticker];
+    if (label) {
+      baseParts.push(label);
     }
-    
-    // Add company name variations if in notes
+
+    // Add company name variations from notes
     if (typeof holding === 'object' && holding.notes) {
-      // Extract potential company names from notes
       const noteWords = holding.notes.split(/\s+/).filter(w => w.length > 3);
       if (noteWords.length > 0 && noteWords.length <= 3) {
-        parts.push(noteWords.join(" "));
+        baseParts.push(noteWords.join(" "));
       }
     }
-    
-    const query = parts.join(" OR ");
-    console.log(`[fetchArticlesForHoldings] Built query for holding: "${query}"`);
+
+    // Add ONE financial context keyword to help filter noise
+    // Philosophy: Keep it simple - most providers don't support complex boolean
+    // Just add "stock" or "price" to filter out entertainment/celebrity news
+    const baseQuery = baseParts.join(" OR ");
+    const query = `${baseQuery} stock`;
+
+    console.log(`[fetchArticlesForHoldings] Built contextual query for ${ticker}: "${query}"`);
     return query;
   });
 
@@ -847,5 +903,7 @@ module.exports = {
   deduplicateArticlesWithSearchContext,
   sortArticlesByDate,
   decodeGoogleRSSUrl, // Exported for future implementation
+  resetGNewsRateLimit, // Export for resetting rate limit at start of runs
+  isGNewsRateLimited, // Export for checking rate limit status
 };
 

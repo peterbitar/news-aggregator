@@ -14,6 +14,7 @@ function mapArticleRowToSignal(row) {
   // Parse why_json if it exists
   let why = [];
   if (row.why_json) {
+    
     try {
       const parsed = JSON.parse(row.why_json);
       why = Array.isArray(parsed) ? parsed : [parsed];
