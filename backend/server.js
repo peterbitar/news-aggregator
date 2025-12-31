@@ -11,7 +11,33 @@ const internalRouter = require("./admin/routes");
 const { startScheduler } = require("./background/scheduler");
 
 const app = express();
-const PORT = process.env.PORT || 5001; //  Uses Render's dynamic port
+const net = require('net');
+
+// Helper function to check if a port is available
+function isPortAvailable(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.listen(port, () => {
+      server.once('close', () => resolve(true));
+      server.close();
+    });
+    server.on('error', () => resolve(false));
+  });
+}
+
+// Helper function to find an available port
+async function findAvailablePort(startPort, maxAttempts = 10) {
+  for (let i = 0; i < maxAttempts; i++) {
+    const port = startPort + i;
+    if (await isPortAvailable(port)) {
+      return port;
+    }
+  }
+  throw new Error(`Could not find an available port starting from ${startPort}`);
+}
+
+// Get port from environment or use default
+const DEFAULT_PORT = process.env.PORT || 5001;
 
 // Initialize database
 getDatabase();
@@ -351,6 +377,113 @@ app.get("/api/feed", (req, res) => {
   }
 });
 
+// GET /api/snapshot - Get curated daily snapshot (3-8 articles)
+// Philosophy: Calm, curated insights not overwhelming feeds
+app.get("/api/snapshot", (req, res) => {
+  try {
+    const db = getDatabase();
+
+    // Get user's holdings
+    const holdingsFromDB = db
+      .prepare("SELECT id, ticker, label, notes FROM holdings WHERE user_id = ?")
+      .all(DEFAULT_USER_ID);
+
+    // Get top articles from last 24 hours, limit to 8
+    // Prioritize: high exposure first, then by score
+    // For testing: relaxed time filter (7 days instead of 24 hours)
+    // Include LLM-generated fields for proper formatting
+    const articles = db.prepare(`
+      SELECT
+        url, title, description, source_name, published_at, url_to_image,
+        profile_adjusted_score, exposure_level, category, event_type,
+        matched_holdings, impact_score, feed_source, searched_by,
+        personalized_title, personalized_teaser, why_it_matters,
+        summary_enriched, summary_short, summary_medium
+      FROM articles
+      WHERE status = 'ranked'
+        AND profile_adjusted_score >= 25
+        AND datetime(published_at) >= datetime('now', '-7 days')
+      ORDER BY
+        CASE exposure_level
+          WHEN 'high' THEN 1
+          WHEN 'moderate' THEN 2
+          WHEN 'low' THEN 3
+          ELSE 4
+        END,
+        profile_adjusted_score DESC,
+        published_at DESC
+      LIMIT 8
+    `).all();
+
+    // Determine if "all clear" state
+    const allClear = articles.length === 0 ||
+                     (articles.length > 0 && articles.every(a => a.exposure_level === 'low' && a.profile_adjusted_score < 35));
+
+    // Format articles for calm display
+    const formattedArticles = articles.map(a => {
+      let matchedHoldings = [];
+      try {
+        matchedHoldings = a.matched_holdings ? JSON.parse(a.matched_holdings) : [];
+      } catch (e) {
+        // Ignore parse errors
+      }
+
+      return {
+        url: a.url,
+        title: a.personalized_title || a.title, // Use LLM-generated personalized title if available
+        description: a.description,
+        source: { name: a.source_name },
+        publishedAt: a.published_at,
+        urlToImage: a.url_to_image,
+        feedSource: a.feed_source,
+        searchedBy: a.searched_by,
+
+        // Wealthy Rabbit specific fields
+        exposureLevel: a.exposure_level || 'low',
+        category: a.category || 'company',
+        eventType: a.event_type,
+        impactScore: a.impact_score,
+        profileAdjustedScore: a.profile_adjusted_score,
+        matchedHoldings,
+        
+        // LLM-generated formatted fields
+        personalizedTitle: a.personalized_title || null,
+        personalizedTeaser: a.personalized_teaser || null,
+        whyItMatters: a.why_it_matters || null,
+        summaryEnriched: a.summary_enriched || a.summary_medium || a.summary_short || null,
+      };
+    });
+
+    // Group by category for better organization
+    const grouped = {
+      macro: formattedArticles.filter(a => a.category === 'macro'),
+      industry: formattedArticles.filter(a => a.category === 'industry'),
+      company: formattedArticles.filter(a => a.category === 'company'),
+    };
+
+    res.json({
+      status: "ok",
+      allClear,
+      message: allClear
+        ? "Nothing significant requires your attention today. Your holdings are stable."
+        : `${articles.length} meaningful updates for you today.`,
+      snapshot: formattedArticles,
+      grouped,
+      metadata: {
+        holdings: holdingsFromDB.map(h => h.ticker),
+        timeWindow: "24 hours",
+        maxArticles: 8,
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching snapshot:", error);
+    res.status(500).json({
+      error: "Failed to fetch daily snapshot",
+      details: error.message
+    });
+  }
+});
+
 // GET /api/feed/debug - Debug endpoint to see what articles exist and their status
 app.get("/api/feed/debug", (req, res) => {
   try {
@@ -598,252 +731,8 @@ app.post("/api/news/holdings/enriched", async (req, res) => {
   }
 });
 
-// ==================== Enrichment Step Endpoints ====================
-
-// POST /api/enrichment/triage - Run triage step on articles
-// PROTECTED: Requires internal key
-app.post("/api/enrichment/triage", requireInternalKey, async (req, res) => {
-  try {
-    const { holdings: holdingsArray, from, to, sources } = req.body;
-    
-    // Get holdings from database
-    const db = getDatabase();
-    let articles = [];
-    let holdingsFromDB = [];
-    
-    if (holdingsArray && Array.isArray(holdingsArray) && holdingsArray.length > 0) {
-      const tickers = holdingsArray.map(t => String(t).toUpperCase().trim()).filter(t => t);
-      const placeholders = tickers.map(() => "?").join(",");
-      
-      holdingsFromDB = db
-        .prepare(`SELECT id, ticker, label, notes FROM holdings WHERE user_id = ? AND ticker IN (${placeholders})`)
-        .all(DEFAULT_USER_ID, ...tickers);
-      
-      if (holdingsFromDB.length === 0) {
-        return res.status(404).json({ error: "No holdings found" });
-      }
-      
-      // Get articles for these holdings
-      const { getCachedArticlesForHoldings } = require("./data/articleStorage");
-    let sourceArray = null;
-    if (sources) {
-      sourceArray = Array.isArray(sources) 
-        ? sources 
-        : sources.split(',').map(s => s.trim().toLowerCase()).filter(s => s);
-    }
-
-      articles = getCachedArticlesForHoldings(holdingsFromDB, {
-        from: from || undefined,
-        to: to || undefined,
-        limit: 1000,
-        sources: sourceArray,
-      });
-    } else {
-      // Get all articles if no holdings specified
-      let sql = "SELECT * FROM articles WHERE 1=1";
-      const params = [];
-      
-      if (from) {
-        sql += " AND published_at >= ?";
-        params.push(from);
-      }
-      if (to) {
-        sql += " AND published_at <= ?";
-        params.push(to);
-      }
-      if (sources) {
-        const sourceArray = Array.isArray(sources) 
-          ? sources 
-          : sources.split(',').map(s => s.trim().toLowerCase()).filter(s => s);
-        if (sourceArray.length > 0) {
-          const placeholders = sourceArray.map(() => "?").join(",");
-          sql += ` AND feed_source IN (${placeholders})`;
-          params.push(...sourceArray);
-        }
-      }
-      
-      sql += " ORDER BY published_at DESC LIMIT 1000";
-      const rows = db.prepare(sql).all(...params);
-      
-      articles = rows.map(row => ({
-        source: { id: row.source_id, name: row.source_name },
-        author: row.author,
-        title: row.title,
-        description: row.description,
-        url: row.url,
-        urlToImage: row.url_to_image,
-        publishedAt: row.published_at,
-        content: row.content,
-        feedSource: row.feed_source || null,
-        searchedBy: row.searched_by || null,
-      }));
-    }
-    
-    if (articles.length === 0) {
-      return res.json({
-        status: "ok",
-        message: "No articles found to triage",
-        triaged: 0,
-        toEnrich: 0,
-        filtered: 0,
-      });
-    }
-    
-    console.log(`[Triage Step] Triaging ${articles.length} articles...`);
-    const triageResults = await triageArticlesByTitle(articles, holdingsFromDB);
-    
-    const toEnrich = triageResults.filter(r => r.shouldEnrich).length;
-    const filtered = triageResults.filter(r => !r.shouldEnrich).length;
-    
-    res.json({
-      status: "ok",
-      message: `Triaged ${articles.length} articles`,
-      triaged: articles.length,
-      toEnrich,
-      filtered,
-      results: triageResults,
-    });
-  } catch (error) {
-    console.error("Error running triage step:", error);
-    res.status(500).json({
-      error: "Failed to run triage step",
-      details: error.message,
-    });
-  }
-});
-
-// POST /api/enrichment/enrich - Run enrichment step on articles that passed triage
-// PROTECTED: Requires internal key
-app.post("/api/enrichment/enrich", requireInternalKey, async (req, res) => {
-  try {
-    const { holdings: holdingsArray, from, to, sources } = req.body;
-    
-    // Get holdings from database
-    const db = getDatabase();
-    let articles = [];
-    
-    if (holdingsArray && Array.isArray(holdingsArray) && holdingsArray.length > 0) {
-      const tickers = holdingsArray.map(t => String(t).toUpperCase().trim()).filter(t => t);
-      const placeholders = tickers.map(() => "?").join(",");
-      
-      const holdingsFromDB = db
-        .prepare(`SELECT id, ticker, label, notes FROM holdings WHERE user_id = ? AND ticker IN (${placeholders})`)
-        .all(DEFAULT_USER_ID, ...tickers);
-      
-      if (holdingsFromDB.length === 0) {
-        return res.status(404).json({ error: "No holdings found" });
-      }
-      
-      // Get articles for these holdings
-      const { getCachedArticlesForHoldings } = require("./data/articleStorage");
-      let sourceArray = null;
-      if (sources) {
-        sourceArray = Array.isArray(sources) 
-          ? sources 
-          : sources.split(',').map(s => s.trim().toLowerCase()).filter(s => s);
-      }
-      
-      articles = getCachedArticlesForHoldings(holdingsFromDB, {
-        from: from || undefined,
-        to: to || undefined,
-        limit: 1000,
-        sources: sourceArray,
-      });
-  } else {
-      // Get all articles if no holdings specified
-      let sql = "SELECT * FROM articles WHERE 1=1";
-      const params = [];
-      
-      if (from) {
-        sql += " AND published_at >= ?";
-        params.push(from);
-      }
-      if (to) {
-        sql += " AND published_at <= ?";
-        params.push(to);
-      }
-      if (sources) {
-        const sourceArray = Array.isArray(sources) 
-          ? sources 
-          : sources.split(',').map(s => s.trim().toLowerCase()).filter(s => s);
-        if (sourceArray.length > 0) {
-          const placeholders = sourceArray.map(() => "?").join(",");
-          sql += ` AND feed_source IN (${placeholders})`;
-          params.push(...sourceArray);
-        }
-      }
-      
-      sql += " ORDER BY published_at DESC LIMIT 1000";
-      const rows = db.prepare(sql).all(...params);
-      
-      articles = rows.map(row => ({
-        source: { id: row.source_id, name: row.source_name },
-        author: row.author,
-        title: row.title,
-        description: row.description,
-        url: row.url,
-        urlToImage: row.url_to_image,
-        publishedAt: row.published_at,
-        content: row.content,
-        feedSource: row.feed_source || null,
-        searchedBy: row.searched_by || null,
-      }));
-    }
-    
-    // Filter to only articles that should be enriched (from triage)
-    const articlesToEnrich = articles.filter(article => {
-      const row = db.prepare("SELECT should_enrich FROM articles WHERE url = ?").get(article.url);
-      return row && row.should_enrich === 1;
-    });
-    
-    if (articlesToEnrich.length === 0) {
-      return res.json({
-        status: "ok",
-        message: "No articles found that passed triage. Run triage step first.",
-        enriched: 0,
-      });
-    }
-    
-    // Get holdings for enrichment
-    let holdingsFromDB = [];
-    if (holdingsArray && Array.isArray(holdingsArray) && holdingsArray.length > 0) {
-      const tickers = holdingsArray.map(t => String(t).toUpperCase().trim()).filter(t => t);
-      const placeholders = tickers.map(() => "?").join(",");
-      holdingsFromDB = db
-        .prepare(`SELECT id, ticker, label, notes FROM holdings WHERE user_id = ? AND ticker IN (${placeholders})`)
-        .all(DEFAULT_USER_ID, ...tickers);
-    }
-    
-    if (holdingsFromDB.length === 0) {
-      return res.status(400).json({ error: "Holdings required for enrichment" });
-    }
-    
-    console.log(`[Enrichment Step] Enriching ${articlesToEnrich.length} articles...`);
-    const enrichedArticles = await enrichArticlesForHoldings(
-      articlesToEnrich,
-      holdingsFromDB,
-      {
-        batchSize: 20,
-        delayBetweenBatches: 1000,
-      }
-    );
-
-    const enrichedCount = enrichedArticles.filter(a => a.summary || a.whyItMatters).length;
-    
-    res.json({
-      status: "ok",
-      message: `Enriched ${enrichedCount} articles`,
-      enriched: enrichedCount,
-      total: articlesToEnrich.length,
-    });
-  } catch (error) {
-    console.error("Error running enrichment step:", error);
-    res.status(500).json({ 
-      error: "Failed to run enrichment step",
-      details: error.message,
-    });
-  }
-});
+// ==================== Legacy Enrichment Endpoints - REMOVED ====================
+// Old triage/enrich endpoints removed - use /internal/process instead
 
 // DELETE /api/articles/clear - Clear all articles from database
 app.delete("/api/articles/clear", (req, res) => {
@@ -865,345 +754,8 @@ app.delete("/api/articles/clear", (req, res) => {
 });
 
 // ==================== Article Processing Pipeline Endpoints ====================
-
-const articlePipeline = require("./pipeline/articlePipeline");
-
-// POST /api/articles/process - Manually trigger pipeline processing for articles
-// This is the ONLY endpoint that calls articlePipeline.processBatch
-// Supports incremental processing: process top N first, return immediately, continue rest in background
-// IMPROVED: Processes ALL user holdings from database, not just provided ones
-// PROTECTED: Requires internal key (or use /internal/process)
-app.post("/api/articles/process", requireInternalKey, async (req, res) => {
-  console.log("\n[Backend] ========== /api/articles/process ENDPOINT CALLED ==========");
-  console.log("[Backend] Request body:", JSON.stringify(req.body, null, 2));
-  
-  try {
-    const { holdings: holdingsArray, userProfile = "balanced", topN, incremental = true } = req.body;
-    console.log("[Backend] Parsed request:", { holdingsArray, userProfile, topN, incremental });
-
-      const db = getDatabase();
-    const DEFAULT_USER_ID = 1;
-    console.log("[Backend] Using DEFAULT_USER_ID:", DEFAULT_USER_ID);
-
-    // Get ALL holdings from database (not just provided ones)
-    // This ensures we process articles for all user holdings
-    console.log("[Backend] Step 1: Fetching ALL holdings from database...");
-    const allHoldingsFromDB = db.prepare(`
-      SELECT id, ticker, label, notes FROM holdings WHERE user_id = ?
-    `).all(DEFAULT_USER_ID);
-    console.log("[Backend] Found", allHoldingsFromDB.length, "holdings in database:", allHoldingsFromDB.map(h => h.ticker));
-
-    if (allHoldingsFromDB.length === 0) {
-      console.log("[Backend] ❌ ERROR: No holdings found in database");
-      return res.json({ 
-        status: "ok", 
-        processed: 0, 
-        message: "No holdings found in database. Please add holdings first." 
-      });
-    }
-
-    // Get all tickers from holdings
-    const allTickers = allHoldingsFromDB.map(h => h.ticker);
-    const placeholders = allTickers.map(() => "?").join(",");
-    console.log("[Backend] Step 2: Extracted tickers:", allTickers);
-    console.log("[Backend] Placeholders:", placeholders);
-
-    // Get articles for ALL holdings that need processing
-    // Check searched_by contains any of the user's holdings
-    // Support both exact match (searched_by = 'NVDA') and comma-separated (searched_by LIKE '%NVDA%')
-    const limit = topN ? (incremental ? topN * 3 : topN) : 100;
-    console.log("[Backend] Step 3: Query limit set to:", limit);
-    
-    // Build LIKE conditions for comma-separated searched_by
-    const likeConditions = allTickers.map(() => "searched_by LIKE '%' || ? || '%'").join(" OR ");
-    console.log("[Backend] LIKE conditions:", likeConditions);
-    
-    // Prepare parameters: first allTickers for IN clause, then allTickers again for LIKE clauses
-    const queryParams = [...allTickers, ...allTickers, limit];
-    console.log("[Backend] Query parameters count:", queryParams.length);
-    console.log("[Backend] Query parameters (first 5):", queryParams.slice(0, 5));
-    
-    // First, let's check total articles in database
-    const totalArticles = db.prepare("SELECT COUNT(*) as count FROM articles").get();
-    console.log("[Backend] Total articles in database:", totalArticles.count);
-    
-    // Check articles by status
-    const statusCounts = db.prepare(`
-      SELECT status, COUNT(*) as count 
-      FROM articles 
-      GROUP BY status
-    `).all();
-    console.log("[Backend] Articles by status:", statusCounts);
-    
-    // Check articles by searched_by
-    const searchedByCounts = db.prepare(`
-      SELECT searched_by, COUNT(*) as count 
-      FROM articles 
-      WHERE searched_by IS NOT NULL
-      GROUP BY searched_by
-      ORDER BY count DESC
-      LIMIT 10
-    `).all();
-    console.log("[Backend] Articles by searched_by (top 10):", searchedByCounts);
-    
-    console.log("[Backend] Step 4: Executing query to find articles that need processing...");
-    
-    // First, let's test the query step by step
-    console.log("[Backend] Testing query components...");
-    
-    // Test 1: Just the holdings match
-    const test1 = db.prepare(`
-      SELECT COUNT(*) as count
-      FROM articles 
-      WHERE (
-        searched_by IN (${placeholders})
-        OR (${likeConditions})
-      )
-    `).get(...allTickers, ...allTickers);
-    console.log("[Backend] Test 1 - Articles matching holdings:", test1.count);
-    
-    // Test 2: Holdings match + status IS NULL
-    const test2 = db.prepare(`
-      SELECT COUNT(*) as count
-      FROM articles 
-      WHERE (
-        searched_by IN (${placeholders})
-        OR (${likeConditions})
-      )
-      AND status IS NULL
-    `).get(...allTickers, ...allTickers);
-    console.log("[Backend] Test 2 - Holdings match + status IS NULL:", test2.count);
-    
-    // Test 3: Holdings match + (status IS NULL OR status = '')
-    const test3 = db.prepare(`
-      SELECT COUNT(*) as count
-      FROM articles 
-      WHERE (
-        searched_by IN (${placeholders})
-        OR (${likeConditions})
-      )
-      AND (status IS NULL OR status = '' OR status = 'null')
-    `).get(...allTickers, ...allTickers);
-    console.log("[Backend] Test 3 - Holdings match + (status IS NULL OR '' OR 'null'):", test3.count);
-    
-    // Test 4: Full query without the status != 'discarded' check
-    const test4 = db.prepare(`
-      SELECT COUNT(*) as count
-      FROM articles 
-      WHERE (
-        searched_by IN (${placeholders})
-        OR (${likeConditions})
-      )
-      AND (
-        status IS NULL 
-        OR status = '' 
-        OR status = 'null'
-        OR status = 'pending' 
-        OR status = 'title_filtered'
-        OR (status = 'content_fetched' AND impact_score IS NULL)
-        OR (status = 'llm_processed' AND profile_adjusted_score IS NULL)
-      )
-    `).get(...allTickers, ...allTickers);
-    console.log("[Backend] Test 4 - Full query without discarded check:", test4.count);
-    
-    const articlesToProcess = db.prepare(`
-      SELECT url, title, description, source_name, author, published_at, searched_by, status
-      FROM articles 
-      WHERE (
-        -- Articles searched by any of the user's holdings (exact match)
-        searched_by IN (${placeholders})
-        OR
-        -- Articles where searched_by contains any ticker (comma-separated)
-        (${likeConditions})
-      )
-      AND (
-        -- Articles that need processing (any stage)
-        status IS NULL 
-        OR status = '' 
-        OR status = 'null'  -- Handle string "null" case
-        OR status = 'pending' 
-        OR status = 'title_filtered'
-        OR (status = 'content_fetched' AND impact_score IS NULL)
-        OR (status = 'llm_processed' AND profile_adjusted_score IS NULL)
-      )
-      AND (status IS NULL OR status != 'discarded')  -- Fix: Handle NULL status properly
-      ORDER BY published_at DESC
-      LIMIT ?
-    `).all(...queryParams);
-    
-    console.log("[Backend] Step 5: Query returned", articlesToProcess.length, "articles");
-    if (articlesToProcess.length > 0) {
-      console.log("[Backend] First 3 articles found:");
-      articlesToProcess.slice(0, 3).forEach((art, idx) => {
-        console.log(`[Backend]   Article ${idx + 1}:`, {
-          url: art.url.substring(0, 50) + "...",
-          title: art.title?.substring(0, 50) + "...",
-          searched_by: art.searched_by,
-          status: art.status
-        });
-      });
-  } else {
-      console.log("[Backend] ❌ No articles found that need processing");
-      console.log("[Backend] Debugging: Checking why no articles were found...");
-      
-      // Debug: Check if any articles exist for these tickers at all
-      const allArticlesForTickers = db.prepare(`
-        SELECT url, title, status, searched_by
-        FROM articles 
-        WHERE (
-          searched_by IN (${placeholders})
-          OR (${likeConditions})
-        )
-        LIMIT 20
-      `).all(...queryParams.slice(0, -1)); // Remove limit param
-      console.log("[Backend] Total articles matching tickers (any status):", allArticlesForTickers.length);
-      if (allArticlesForTickers.length > 0) {
-        console.log("[Backend] Sample articles (first 5):", allArticlesForTickers.slice(0, 5).map(a => ({
-          url: a.url.substring(0, 50) + "...",
-          status: a.status,
-          searched_by: a.searched_by
-        })));
-      }
-      
-      // Debug: Check if any articles match holdings
-      const articlesMatchingHoldings = db.prepare(`
-        SELECT url, title, searched_by, status
-        FROM articles 
-        WHERE (
-          searched_by IN (${placeholders})
-          OR (${likeConditions})
-        )
-        LIMIT 10
-      `).all(...allTickers, ...allTickers);
-      console.log("[Backend] Articles matching holdings (any status):", articlesMatchingHoldings.length);
-      if (articlesMatchingHoldings.length > 0) {
-        console.log("[Backend] Sample matching articles:");
-        articlesMatchingHoldings.slice(0, 3).forEach((art, idx) => {
-          console.log(`[Backend]   ${idx + 1}: status="${art.status}", searched_by="${art.searched_by}"`);
-        });
-      }
-    }
-    
-    if (articlesToProcess.length === 0) {
-      console.log("[Backend] ❌ Returning early: No articles found that need processing");
-      return res.json({ 
-        status: "ok", 
-        processed: 0, 
-        message: "No articles found that need processing for your holdings" 
-      });
-    }
-    
-    const articles = articlesToProcess.map(row => ({
-      url: row.url,
-      title: row.title,
-      description: row.description,
-      source: { name: row.source_name },
-      author: row.author,
-      publishedAt: row.published_at,
-      searchedBy: row.searched_by,
-    }));
-    
-    console.log("[Backend] Step 7: Mapped articles to process format");
-    console.log("[Backend] Step 8: Preparing to call processBatch with", articles.length, "articles and", allHoldingsFromDB.length, "holdings");
-    
-    // Process with ALL holdings from database
-    if (incremental && articles.length > (topN || 30)) {
-      console.log("[Backend] Step 9: Using INCREMENTAL processing mode");
-      // Use incremental processing: process top N first, return immediately, continue rest in background
-      console.log(`[Pipeline] Processing ${articles.length} articles incrementally (top ${topN || 30} first) for ${allHoldingsFromDB.length} holdings...`);
-      
-      const { immediateResults, backgroundPromise, total, processed: processedCount, remaining } = 
-        await articlePipeline.processBatchIncremental(articles, allHoldingsFromDB, userProfile, {
-          topN: topN || 30,
-          llmBatchSize: 20,
-          stage3BatchSize: 8,
-        });
-      
-      const processed = immediateResults.filter(r => r.status === "personalized").length;
-      const discarded = immediateResults.filter(r => r.status === "discarded").length;
-      const errors = immediateResults.filter(r => r.status === "error").length;
-      
-      // Don't await background promise - let it run in background
-      backgroundPromise.catch(err => {
-        console.error("[Pipeline] Background processing error:", err);
-      });
-      
-      res.json({
-        status: "ok",
-        message: `Processed ${processedCount} articles immediately, ${remaining} processing in background`,
-        processed,
-        discarded,
-        errors,
-        total,
-        immediate: processedCount,
-        background: remaining,
-        incremental: true,
-        holdingsProcessed: allHoldingsFromDB.map(h => h.ticker),
-      });
-    } else {
-      // Use regular batch processing
-      console.log("[Backend] Step 9: Using REGULAR batch processing mode");
-      console.log(`[Backend] Calling processBatch with ${articles.length} articles for ${allHoldingsFromDB.length} holdings...`);
-      const results = await articlePipeline.processBatch(articles, allHoldingsFromDB, userProfile, {
-        llmBatchSize: 20,
-        stage3BatchSize: 8,
-        delayBetweenBatches: 1000,
-      });
-      
-      console.log("[Backend] Step 10: processBatch completed, processing results...");
-      console.log("[Backend] Results summary:", {
-        total: results.length,
-        personalized: results.filter(r => r.status === "personalized").length,
-        discarded: results.filter(r => r.status === "discarded").length,
-        errors: results.filter(r => r.status === "error").length,
-      });
-      
-      const processed = results.filter(r => r.status === "personalized").length;
-      const discarded = results.filter(r => r.status === "discarded").length;
-      const errors = results.filter(r => r.status === "error").length;
-      
-      console.log("[Backend] Step 11: Sending response to client");
-      res.json({ 
-        status: "ok", 
-        processed,
-        discarded,
-        errors,
-        total: articles.length,
-        incremental: false,
-        message: `Processed ${articles.length} articles through full pipeline (Stages 1-4)`,
-        holdingsProcessed: allHoldingsFromDB.map(h => h.ticker),
-      });
-    }
-  } catch (error) {
-    console.error("Error processing articles:", error);
-    res.status(500).json({
-      error: "Failed to process articles",
-      details: error.message,
-    });
-  }
-});
-
-// POST /api/articles/rank - Run Stage 5 ranking and clustering
-// PROTECTED: Requires internal key (or use /internal/rank)
-app.post("/api/articles/rank", requireInternalKey, async (req, res) => {
-  console.log("\n[Backend] ========== /api/articles/rank ENDPOINT CALLED ==========");
-  console.log("[Backend] Request body:", JSON.stringify(req.body, null, 2));
-  
-  try {
-    const { cutoffScore = 50 } = req.body;
-    console.log(`[Backend] Cutoff score: ${cutoffScore}`);
-    
-    const result = await articlePipeline.processBatchRanking(cutoffScore);
-    console.log("[Backend] Ranking result:", result);
-    res.json({ status: "ok", result });
-  } catch (error) {
-    console.error("Error ranking articles:", error);
-    res.status(500).json({
-      error: "Failed to rank articles",
-      details: error.message,
-    });
-  }
-});
+// Legacy /api/articles/process and /api/articles/rank endpoints removed
+// Use /internal/process and /internal/rank instead
 
 // GET /api/articles - Public API endpoint for external apps to query articles by ticker symbols
 // Example: /api/articles?tickers=NVDA,AAPL&limit=50&minScore=40
@@ -1538,12 +1090,88 @@ app.get("/api/articles/discarded", requireInternalKey, (req, res) => {
   }
 });
 
-// Start the server
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`[Server] v1 endpoints available at /v1/*`);
-  console.log(`[Server] Internal endpoints available at /internal/* (requires x-internal-key header)`);
+// Handle uncaught exceptions to prevent crashes
+process.on('uncaughtException', (error) => {
+  console.error('[Fatal] Uncaught Exception:', error.message);
+  console.error(error.stack);
+  // Don't exit - let the server try to continue
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Fatal] Unhandled Rejection at:', promise, 'reason:', reason);
+  // Don't exit - let the server try to continue
+});
+
+// Start the server with automatic port finding
+async function startServer() {
+  let PORT = DEFAULT_PORT;
   
-  // Start scheduler (if not disabled)
-  startScheduler();
+  // In development, try to find an available port if default is taken
+  if (process.env.NODE_ENV !== 'production' && !process.env.PORT) {
+    const available = await isPortAvailable(PORT);
+    if (!available) {
+      console.log(`[Info] Port ${PORT} is in use, searching for available port...`);
+      try {
+        PORT = await findAvailablePort(PORT);
+        console.log(`[Info] Using port ${PORT} instead`);
+      } catch (error) {
+        console.error(`[Error] ${error.message}`);
+        console.error(`[Error] Please free up a port or set PORT environment variable`);
+        process.exit(1);
+      }
+    }
+  }
+  
+  const server = app.listen(PORT, () => {
+    console.log(`✅ Server running on port ${PORT}`);
+    console.log(`[Server] v1 endpoints available at /v1/*`);
+    console.log(`[Server] Internal endpoints available at /internal/* (requires x-internal-key header)`);
+    console.log(`[Server] API base URL: http://localhost:${PORT}`);
+    
+    // Start scheduler (if not disabled)
+    startScheduler();
+  });
+
+  // Handle server errors (like port already in use)
+  server.on('error', async (error) => {
+    if (error.code === 'EADDRINUSE') {
+      // In production or when PORT is explicitly set, fail fast
+      if (process.env.PORT || process.env.NODE_ENV === 'production') {
+        console.error(`[Error] Port ${PORT} is already in use. Please stop the existing server or use a different port.`);
+        console.error(`[Error] To find and kill the process: lsof -ti:${PORT} | xargs kill`);
+        process.exit(1);
+      } else {
+        // In development, try to find another port
+        console.log(`[Info] Port ${PORT} is in use, trying alternative port...`);
+        try {
+          PORT = await findAvailablePort(PORT + 1);
+          console.log(`[Info] Retrying on port ${PORT}...`);
+          // Restart server on new port
+          const newServer = app.listen(PORT, () => {
+            console.log(`✅ Server running on port ${PORT}`);
+            console.log(`[Server] API base URL: http://localhost:${PORT}`);
+            startScheduler();
+          });
+          newServer.on('error', (err) => {
+            console.error('[Error] Failed to start server:', err);
+            process.exit(1);
+          });
+        } catch (err) {
+          console.error(`[Error] Could not find available port: ${err.message}`);
+          process.exit(1);
+        }
+      }
+    } else {
+      console.error('[Error] Server error:', error);
+      throw error;
+    }
+  });
+  
+  return server;
+}
+
+// Start the server
+startServer().catch((error) => {
+  console.error('[Fatal] Failed to start server:', error);
+  process.exit(1);
 });

@@ -62,9 +62,10 @@ REACT_APP_BACKEND_URL=http://localhost:5001
 Navigate to the backend folder and start the server:
 ```sh
 cd backend
-npm start
+npm start        # Production mode
+npm run dev      # Development mode (with auto-restart via nodemon)
 ```
-This will start the backend at http://localhost:5001.
+This will start the backend at http://localhost:5001 (or next available port if 5001 is taken).
 
 ### **5️⃣ Start the Frontend**
 Navigate to the `news-aggregator` project for frontend and start the React app
