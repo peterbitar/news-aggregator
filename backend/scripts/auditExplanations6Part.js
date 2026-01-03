@@ -85,12 +85,12 @@ function getExplanations() {
         sg.scope,
         sg.primary_ticker,
         sg.date_bucket,
-        sge.what_happened,
-        sge.why_it_matters_now,
-        sge.who_this_applies_to,
-        sge.what_to_watch_next,
-        sge.what_this_does_not_mean,
-        sge.sources_summary,
+        sge.summary,
+        sge.whyItMattersForYou,
+        sge.whyThisHappened,
+        sge.mostLikelyScenarios,
+        sge.whatToKeepInMind,
+        sge.sources,
         sge.created_at
       FROM story_group_explanations sge
       JOIN story_groups sg ON sge.story_group_id = sg.id
@@ -109,61 +109,89 @@ function analyzeExplanation(exp) {
   const issues = [];
   const warnings = [];
 
-  // Check summary (what_happened)
-  if (!exp.what_happened) {
-    issues.push("Missing summary (what_happened)");
-  } else if (exp.what_happened.length < 50) {
-    warnings.push("Summary too short (what_happened < 50 chars)");
+  // Check all 6 parts are present
+  if (!exp.summary || exp.summary.trim() === "") {
+    issues.push("Missing summary");
+  } else if (exp.summary.length < 50) {
+    warnings.push("Summary too short (< 50 chars)");
   }
 
-  // Check whyItMattersForYou (why_it_matters_now)
-  if (!exp.why_it_matters_now) {
-    issues.push("Missing whyItMattersForYou (why_it_matters_now)");
+  if (!exp.whyItMattersForYou || exp.whyItMattersForYou.trim() === "") {
+    issues.push("Missing whyItMattersForYou");
   } else if (
-    !exp.why_it_matters_now.toLowerCase().includes("does not") &&
-    !exp.why_it_matters_now.toLowerCase().includes("don't")
+    !exp.whyItMattersForYou.toLowerCase().includes("does not") &&
+    !exp.whyItMattersForYou.toLowerCase().includes("don't") &&
+    !exp.whyItMattersForYou.toLowerCase().includes("does not")
   ) {
     warnings.push("Missing explicit 'who this does NOT affect' statement");
   }
 
-  // Check whyThisHappened (missing - would need data migration)
-  if (!exp.why_it_matters_now) {
-    issues.push(
-      "Missing whyThisHappened section (requires data migration/regeneration)"
-    );
+  if (!exp.whyThisHappened || exp.whyThisHappened.trim() === "") {
+    issues.push("Missing whyThisHappened");
   }
 
-  // Check mostLikelyScenarios (missing - would need data migration)
-  issues.push("Missing mostLikelyScenarios (requires data migration)");
-
-  // Check whatToKeepInMind (what_to_watch_next converted)
-  if (!exp.what_to_watch_next) {
-    issues.push("Missing whatToKeepInMind (what_to_watch_next)");
+  if (!exp.mostLikelyScenarios || exp.mostLikelyScenarios.trim() === "") {
+    issues.push("Missing mostLikelyScenarios");
   } else {
-    const hasWatch = exp.what_to_watch_next.toLowerCase().includes("watch");
-    if (!hasWatch) {
-      warnings.push("what_to_watch_next may not have specific signals");
+    try {
+      const scenarios = JSON.parse(exp.mostLikelyScenarios);
+      if (!Array.isArray(scenarios) || scenarios.length < 2 || scenarios.length > 3) {
+        issues.push(
+          `mostLikelyScenarios has invalid count (${
+            Array.isArray(scenarios) ? scenarios.length : "not array"
+          }, expected 2-3)`
+        );
+      }
+    } catch (e) {
+      issues.push("mostLikelyScenarios is not valid JSON");
     }
   }
 
-  // Check sources
-  if (!exp.sources_summary) {
-    issues.push("Missing sources (sources_summary)");
+  if (!exp.whatToKeepInMind || exp.whatToKeepInMind.trim() === "") {
+    issues.push("Missing whatToKeepInMind");
+  } else {
+    try {
+      const items = JSON.parse(exp.whatToKeepInMind);
+      if (!Array.isArray(items) || items.length < 3 || items.length > 5) {
+        warnings.push(
+          `whatToKeepInMind has ${
+            Array.isArray(items) ? items.length : "invalid"
+          } items (expected 3-5)`
+        );
+      }
+    } catch (e) {
+      issues.push("whatToKeepInMind is not valid JSON");
+    }
   }
 
-  // Check for 6-part structure indicators
+  if (!exp.sources || exp.sources.trim() === "") {
+    issues.push("Missing sources");
+  } else {
+    try {
+      const sources = JSON.parse(exp.sources);
+      if (!Array.isArray(sources) || sources.length === 0) {
+        issues.push(
+          `sources invalid (${
+            Array.isArray(sources) ? "empty array" : "not array"
+          })`
+        );
+      }
+    } catch (e) {
+      issues.push("sources is not valid JSON");
+    }
+  }
+
+  // Check for urgency language (FAIL)
   const allText = [
-    exp.what_happened,
-    exp.why_it_matters_now,
-    exp.who_this_applies_to,
-    exp.what_to_watch_next,
-    exp.what_this_does_not_mean,
+    exp.summary,
+    exp.whyItMattersForYou,
+    exp.whyThisHappened,
+    exp.whatToKeepInMind,
   ]
     .filter(Boolean)
     .join(" ")
     .toLowerCase();
 
-  // Check for urgency language (FAIL)
   const urgencyWords = [
     "breaking",
     "urgent",
