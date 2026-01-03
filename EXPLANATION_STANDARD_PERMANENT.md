@@ -1,176 +1,80 @@
-# PERMANENT EXPLANATION STANDARD
+# Permanent Explanation Standard v1.0
 
-**Effective Date:** January 2, 2026
-**Version:** 1.0
-**Scope:** All news story explanations in the aggregator system
+**Effective:** January 2, 2026
+**Scope:** All news explanations in the aggregator system
+**Status:** Non-negotiable standard
 
----
-
-## Purpose
-
-The explanation layer transforms raw news events into *complete understanding* for non-finance readers.
-
-A reader should:
-- ✓ Understand what happened (facts)
-- ✓ Understand WHY it happened (causal chain)
-- ✓ Understand why it matters TODAY (second-order effects)
-- ✓ Know specifically what to watch (concrete signals)
-- ✓ Understand what NOT to believe (guardrails)
-- ✓ Feel CLOSURE (no "I should Google this")
+This is the **single source of truth** for all explanation generation and review.
 
 ---
 
-## Quality Standards (NON-NEGOTIABLE)
+## Core Philosophy
 
-### Standard 1: Causal Clarity
+This is **not** a trading product. This is an **orientation and calm-down product** for real people, including non-finance professionals.
 
-**Rule:** Every explanation MUST explain the "WHY" - not just the "WHAT."
+### 🎯 The Core Goal (Non-Negotiable)
 
-**Bad:**
-```
-"The Fed raised rates because inflation is high."
-```
-- This is obvious. Why did THIS Fed raise rates THIS time?
+Every explanation must help users:
 
-**Good:**
-```
-"The Fed raised rates because inflation exceeded 5%, which would erode savings.
-However, the decision specifically reflects a shift in focus: officials are now
-equally worried about financial system stability (banks having enough liquidity).
-This shift happened because of stress episodes in late 2025 when liquidity tightened
-unexpectedly, forcing emergency intervention."
-```
+1. **Understand what's happening** (facts only)
+2. **Understand whether it matters to them** (personal relevance)
+3. **Understand what usually happens next** (context, not prediction)
+4. **Walk away calmer, not more alert or reactive** (emotional outcome)
 
-**How to check:** If removing a sentence makes the explanation obviously incomplete, keep it.
+### ❌ The Failure Test
 
----
+If a reader feels the need to:
+- Google more information
+- Refresh social media
+- Check stock prices immediately
+- Feel anxiety or FOMO
 
-### Standard 2: Second-Order Effects
-
-**Rule:** "Why it matters NOW" must show what CHANGES in the world.
-
-**Bad:**
-```
-"This is important for investors."
-"This could affect market performance."
-"Relevant for portfolio construction."
-```
-- Generic hand-waving. No specific change.
-
-**Good:**
-```
-"Here's what changed: If rates rise further, banks will face lower deposit
-competition. This means banks will cut savings account rates FASTER than expected.
-Your 4.5% savings account could drop to 2.8% within 30 days instead of 90 days.
-For borrowers, it means mortgage rates won't fall as fast as expected either."
-```
-
-**How to check:** Rewrite the statement to answer "Specifically, what happens differently now?"
+→ **The explanation failed.**
 
 ---
 
-### Standard 3: Concrete Signals (NOT Vague Watching)
-
-**Rule:** Each "what to watch next" MUST follow this format:
-
-```
-"Watch for X (published WHERE, HOW OFTEN) because it will indicate Y.
-- If X happens, it means Z (positive/negative implication)
-- If X doesn't happen, it means W (alternative)"
-```
-
-**Bad:**
-```
-"Monitor for follow-up developments and market reaction."
-"Watch for official statements and analyst commentary."
-```
-- No WHERE, HOW, or meaning.
-
-**Good:**
-```
-"Watch the Federal Reserve Bank of New York website daily for SOFR
-(Secured Overnight Financing Rate).
-
-- If SOFR exceeds 6% for 3+ consecutive days, banks are struggling to get
-  short-term cash and the Fed's concern is real.
-
-- If SOFR stays below 5%, banks have plenty of cash and there's no crisis."
-```
-
-**How to check:** Can a Mom follow this and understand what it means? If not, it's too vague.
-
 ---
 
-### Standard 4: Specific Audience
+## The 6-Part Explanation Structure (Mandatory Order)
 
-**Rule:** "Who this applies to" must be SPECIFIC, not generic.
+Every explanation must follow this structure **exactly**, in this **exact order**:
 
-**Bad:**
-```
-"All market participants."
-"Relevant to portfolio construction and risk management."
-```
+### 1. Summary (3–5 sentences)
+**What is this about, in simple terms?**
+- Plain English, no jargon
+- Readable in under 15 seconds
+- Answers: "What happened?"
 
-**Good:**
-```
-"This applies if you:
-- Own Apple stock directly
-- Have a 401(k) or IRA with a tech index fund (QQQ, VGT, XLK)
-- Bank with a large U.S. bank (JPMorgan, Bank of America, Wells Fargo)
+### 2. Why It Matters For You (1–2 paragraphs)
+**Should I care? In what way does this touch my life or peace of mind?**
+- Explicitly state who this affects
+- Explicitly state who it does NOT affect
+- Avoid vague phrases ("important for investors," "could affect portfolio")
 
-This does NOT apply if you:
-- Only own bonds
-- Have cash in FDIC-insured savings accounts
-- Own only international stocks"
-```
+### 3. Why This Happened (1–2 paragraphs)
+**I understand why this exists, not just that it exists.**
+- Clear causal chain
+- Step-by-step logic, no speculation
+- Define technical terms immediately inline
+- Use everyday examples when possible
 
-**How to check:** Would a Mom know if it applies to her? If not, be more specific.
+### 4. Most Likely Scenarios (2–3 bounded paths)
+**Here are the paths this type of situation usually takes.**
+- Each scenario has: description, likelihood (Low/Medium/High), signals to confirm, signals to contradict
+- NO price targets, NO urgency, NO predictions
+- This is context, not direction
 
----
+### 5. What To Keep In Mind (3–5 emotional guardrails)
+**Emotional closure and guardrails against overreaction.**
+- Common misunderstandings
+- Why people overreact to this type of news
+- Why this is not a reason to act emotionally
+- Goal: Actively lower stress
 
-### Standard 5: Misconception Prevention
-
-**Rule:** "What this does NOT mean" must prevent 2+ specific misreadings.
-
-**Bad:**
-```
-"This is informational only and does not constitute investment advice."
-```
-- Legal boilerplate, not helpful.
-
-**Good:**
-```
-"This does NOT mean:
-- The Fed will cut rates immediately (they're monitoring, not panicking)
-- A financial crisis is imminent (funding stress is quarterly and normal)
-- You should sell everything (liquidity stress ≠ market crash)
-- Inflation is no longer a concern (the Fed still cares about it)"
-```
-
-**How to check:** What 2-3 fear/hype conclusions might a reader jump to? Prevent those.
-
----
-
-### Standard 6: Plain Language
-
-**Rule:** Every finance term must be defined inline. Sentences must be <20 words.
-
-**Bad:**
-```
-"When gross margin compression occurs due to product mix shifts,
-it signals operational headwinds that could constrain earnings growth."
-```
-- 16 words but still uses jargon: gross margin, product mix, operational headwinds
-
-**Good:**
-```
-"When profit per dollar of sales falls because the company sells more
-low-margin products (phones) and fewer high-margin services, it suggests
-growth is becoming harder."
-```
-- Simpler words. Definitions inline.
-
-**How to check:** Read it aloud to a non-finance person. Can they understand?
+### 6. Sources (transparent, no urgency)
+**Listed so you know where information comes from — not because you need to read them.**
+- Each source has: name, type (Primary/Secondary), reason
+- User-facing note: "This explanation is based on publicly available information from reputable sources."
 
 ---
 
