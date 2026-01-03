@@ -163,10 +163,52 @@ Returns personalized feed with **Wealthy Rabbit explanations** based on user's h
         }
       ],
       "explanation": {
-        "headline": "Why This Matters to You",
-        "impact": "Positive impact on your AAPL holding",
-        "action": "Monitor quarterly results",
-        "context": "Broader market implications...",
+        "summary": "Apple reported Q1 earnings that beat analyst expectations. Revenue was up 12% year-over-year. The company also announced a new product line. This is Apple's strongest quarter in the past 18 months.",
+        "whyItMattersForYou": "This matters because you own Apple stock. The strong earnings support the value of your investment. It does NOT mean you should buy more or sell now—it's context, not a signal to act.",
+        "whyThisHappened": "Apple's revenue grew because of strong demand from customers in Asia and Europe. The new product line expanded their addressable market. Competition has not materially increased.",
+        "mostLikelyScenarios": [
+          {
+            "scenario": "Apple continues steady growth over next 2 quarters",
+            "likelihood": "Medium",
+            "whatConfirmsIt": "Quarterly earnings remain above 10% growth",
+            "whatMakesItUnlikely": "Major economic recession or sharp decline in consumer spending"
+          },
+          {
+            "scenario": "Market overreacts and stock temporarily rises sharply",
+            "likelihood": "Medium",
+            "whatConfirmsIt": "Stock rises 5%+ in next few days on positive sentiment",
+            "whatMakesItUnlikely": "Broader market volatility or negative macro news"
+          },
+          {
+            "scenario": "Margins compress due to increased competition",
+            "likelihood": "Low",
+            "whatConfirmsIt": "Next quarter shows margin decline of 2%+ despite revenue growth",
+            "whatMakesItUnlikely": "Current competitive position remains strong; pricing power intact"
+          }
+        ],
+        "whatToKeepInMind": [
+          "One good quarter does not guarantee future performance. Companies have cycles.",
+          "It's common to feel the urge to buy more when things are good. Resist that. Your allocation is already set.",
+          "Media will likely emphasize this news heavily. That's noise. Your investment thesis hasn't changed.",
+          "This is not a reason to check your stock price daily or worry about missing upside."
+        ],
+        "sources": [
+          {
+            "name": "Apple Investor Relations - Q1 2026 Earnings Report",
+            "type": "Primary",
+            "reason": "Official company earnings disclosure"
+          },
+          {
+            "name": "Federal Reserve Economic Data (FRED)",
+            "type": "Primary",
+            "reason": "Macroeconomic context for consumer demand"
+          },
+          {
+            "name": "Bloomberg, Reuters",
+            "type": "Secondary",
+            "reason": "Financial news analysis and market context"
+          }
+        ],
         "confidence": 0.95
       }
     }
@@ -218,11 +260,26 @@ struct PersonalizedSignal: Codable {
     }
 
     struct Explanation: Codable {
-        let headline: String
-        let impact: String
-        let action: String
-        let context: String
-        let confidence: Double
+        let summary: String                           // 3-5 plain-English sentences
+        let whyItMattersForYou: String               // Who it affects, who it doesn't
+        let whyThisHappened: String                  // Causal chain, no speculation
+        let mostLikelyScenarios: [Scenario]          // 2-3 bounded paths
+        let whatToKeepInMind: [String]               // Emotional guardrails
+        let sources: [Source]                        // Transparency
+        let confidence: Double                        // 0.0-1.0
+
+        struct Scenario: Codable {
+            let scenario: String                      // Short description
+            let likelihood: String                    // "Low", "Medium", "High"
+            let whatConfirmsIt: String               // Signal to watch for
+            let whatMakesItUnlikely: String          // Counter-signals
+        }
+
+        struct Source: Codable {
+            let name: String                         // Source name
+            let type: String                         // "Primary" or "Secondary"
+            let reason: String                       // Why this source matters
+        }
     }
 }
 ```
@@ -537,6 +594,119 @@ struct StoryGroup: Codable {
     let created_at: String            // ISO8601 timestamp
 }
 ```
+
+---
+
+## Explanation Structure (6-Part Framework)
+
+Every explanation follows a strict structure designed for **calm orientation**, not trading activation.
+
+### Philosophy
+
+This is **not** a trading app. The goal is to help users:
+1. Understand what's happening
+2. Understand if it matters to them
+3. Understand what usually happens next
+4. **Walk away calmer, not more reactive**
+
+If a user feels the urge to Google, check prices, or refresh social media → the explanation failed.
+
+### The 6 Required Parts (Exact Order)
+
+**1. Summary** (3–5 sentences)
+- Plain English, no jargon
+- What is this about?
+- Readable in under 15 seconds
+
+**2. Why It Matters For You** (1–2 paragraphs)
+- Explicitly state who this affects and who it doesn't
+- Personal framing tied to holdings
+- Avoid vague phrases like "important for investors"
+
+**3. Why This Happened** (1–2 paragraphs)
+- Clear causal chain
+- Step-by-step logic, no speculation
+- Define any technical terms immediately
+- Use everyday examples when possible
+
+**4. Most Likely Scenarios** (2–3 scenarios)
+- NOT predictions, just context
+- Each scenario includes:
+  - Short description
+  - Likelihood: Low / Medium / High (no percentages)
+  - What would confirm this scenario
+  - What would make it unlikely
+- Tone: "Here are the paths this type of situation usually takes"
+
+**5. What To Keep In Mind** (3–5 bullets)
+- Emotional guardrails and cognitive closure
+- Common misunderstandings
+- Why this is not a reason to act emotionally
+- Goal: actively lower stress
+
+**6. Sources** (transparent, no urgency)
+- Each source has: name, type (Primary/Secondary), reason
+- User-facing text: "This explanation is based on publicly available information from reputable sources. They are listed so you know where the information comes from — not because you need to read them."
+
+### Example Structure in Practice
+
+```json
+{
+  "summary": "Federal Reserve raised interest rates by 0.25%. This is the 5th increase in 12 months. The total increase is 2% since the rate hikes began.",
+  "whyItMattersForYou": "If you have a mortgage, this may eventually increase your payments. If you have savings in a bank account, you may earn slightly more interest. If you own stocks, higher rates can reduce future company valuations. This does NOT mean you should sell stocks or pay off your mortgage early.",
+  "whyThisHappened": "The Fed raised rates to fight inflation (when prices increase faster than wages). Inflation has been above their 2% target. By raising rates, they make borrowing more expensive, which slows spending and brings inflation down.",
+  "mostLikelyScenarios": [
+    {
+      "scenario": "Inflation continues to decline; economy stays stable",
+      "likelihood": "Medium",
+      "whatConfirmsIt": "Inflation drops below 3% in next 3 months",
+      "whatMakesItUnlikely": "Oil prices spike; supply chain disruption occurs"
+    },
+    {
+      "scenario": "Economic slowdown occurs; Fed pauses rate increases",
+      "likelihood": "Medium",
+      "whatConfirmsIt": "Job growth slows; unemployment rises 0.5%",
+      "whatMakesItUnlikely": "Inflation remains above 4%"
+    }
+  ],
+  "whatToKeepInMind": [
+    "Rate changes affect the economy gradually, not immediately. Full impact takes 6-12 months.",
+    "Higher rates are not good or bad — they're tools. They help control inflation.",
+    "Your investment strategy should not change based on a single rate decision.",
+    "Checking your portfolio daily will only create anxiety. Your time horizon is much longer."
+  ],
+  "sources": [
+    {
+      "name": "Federal Reserve FOMC Minutes",
+      "type": "Primary",
+      "reason": "Official policy statement"
+    },
+    {
+      "name": "Bureau of Labor Statistics",
+      "type": "Primary",
+      "reason": "Official inflation data"
+    }
+  ]
+}
+```
+
+### Language Rules
+
+- Short sentences (aim <20 words)
+- Simple vocabulary
+- Define finance terms instantly
+- Calm tone
+- No drama, no hype language
+- No urgency markers ("breaking," "urgent," "must")
+
+### Success Test
+
+An explanation passes if:
+- A non-finance reader understands it fully
+- Anxiety is reduced
+- FOMO is neutralized
+- The reader feels oriented, not activated
+- There is no immediate urge to research further
 
 ---
 
