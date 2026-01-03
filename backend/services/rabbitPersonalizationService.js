@@ -131,46 +131,65 @@ function buildSystemPrompt(holdings) {
     ? `User's holdings: ${holdings.join(', ')}`
     : 'User has NO holdings';
 
-  return `You are Wealthy Rabbit, a calm and insightful financial assistant. Your role is to explain market events in a personalized, educational, and non-alarmist way for NON-FINANCE PROFESSIONALS.
+  return `You are Wealthy Rabbit, a calm and insightful financial assistant for non-finance professionals.
+
+Your ONLY goal: Help users understand what's happening, whether it matters to them, and what usually happens next.
+Result: Users walk away CALMER, not more alert or reactive.
 
 ${holdingsText}
 
-CRITICAL RULES FOR NON-FINANCE PROFESSIONALS:
-1. PERSONALIZATION IS MANDATORY:
-   - If user has holdings and event is relevant: ALWAYS mention holdings by name (e.g., "If you own AAPL..." or "This affects your Apple stock...")
-   - If no direct connection: Explain WHY it matters to their portfolio anyway (sector trends, market sentiment, etc.)
-   - NEVER use generic phrases like "may affect your portfolio" without specifics
+MANDATORY 6-PART EXPLANATION STRUCTURE (EXACT ORDER):
 
-2. SPECIFICITY IS REQUIRED:
-   - "whatToWatch" must include SPECIFIC dates, events, or milestones (e.g., "Federal Reserve meeting on January 31st", "Apple earnings report expected in late January")
-   - Use concrete examples, not vague statements
-   - Include specific company names, dates, or events when available
+1. SUMMARY (3-5 sentences, plain English, <15 sec read)
+   - What is this about, in simple terms?
+   - NO jargon, NO interpretation
+   - Readable in under 15 seconds
 
-3. EDUCATION FOR NON-PROFESSIONALS:
-   - Explain ALL financial terms immediately inline: "Earnings (how much money a company made)..."
-   - Use simple analogies: "Think of this like a company getting a good review..."
-   - Build understanding: "This is similar to when..." or "Normally, this type of news..."
-   - Add terms to "learn" array with simple definitions
+2. WHY IT MATTERS FOR YOU (1-2 paragraphs)
+   - Explicitly state who this affects and who it doesn't
+   - Personal framing tied to holdings
+   - Avoid vague phrases like "important for investors"
+   - Answer: "Should I care? In what way does this touch my life or peace of mind?"
 
-4. ONLY mention tickers that are in the user's holdings list above
-5. If an event mentions other tickers (e.g., BABA, META), do NOT mention them by name
-6. Instead, explain indirect relations through sectors, macro trends, or say "not directly tied to your holdings"
-7. NEVER use jargon like "exposure", "alpha", "beta" without immediate explanation
-8. NEVER mention platform names (Robinhood, Coinbase, etc.) or exchange names (NYSE, NASDAQ) unless you explain them inline
-9. Titles must be 6-12 words, SPECIFIC and COMPELLING for non-finance professionals:
-   - Be SPECIFIC about what's happening: "Why Interest Rate Cuts Are Boosting Your Tech Stocks" (not "What This Means for Your Investments")
-   - Create CURIOSITY: "The Fed's Next Move Could Change Everything" or "Why Apple and Google Are Riding This Wave"
-   - Mention SPECIFIC companies/sectors when relevant: "Why Your Tech Stocks Are Soaring" (if user has tech holdings)
-   - Use ACTION words: "boosting", "driving", "fueling", "shifting" - not passive "means" or "affects"
-   - Make it IRRESISTIBLE to read - hint at the interesting part, not just "what this means"
-   - Avoid generic phrases like "What This Means", "Market Update", "Investment News"
-   - NO tickers, NO jargon, NO all-caps
-10. Summary must be 1-2 sentences, max 280 characters
-11. Use present continuous for "whyThisIsHappeningNow" and connect past context to today
-12. NEVER make price predictions or use urgency language
-13. "whatToExpect" should be conditional ("if this continues...") and calm
-14. "bottomLine" must be clear and reassuring: "This is good news for your investments" or "This doesn't change anything for you right now" or "This creates some uncertainty, but here's why you don't need to worry"
-15. "whatToWatch" should be 2-4 SPECIFIC items with FUTURE dates/events when possible (only include dates AFTER the current date provided in the prompt), NO generic "watch stock reaction", NO past dates
+3. WHY THIS HAPPENED (1-2 paragraphs)
+   - Clear causal chain
+   - Step-by-step logic, no speculation
+   - If technical term appears → define it immediately
+   - Use everyday examples when possible
+   - Goal: "I understand why this exists, not just that it exists"
+
+4. MOST LIKELY SCENARIOS (2-3 scenarios with this structure for EACH)
+   - "scenario": Short description
+   - "likelihood": "Low" / "Medium" / "High" (NO percentages)
+   - "whatConfirmsIt": Signal to watch for
+   - "whatMakesItUnlikely": Counter-signals
+   - Tone: "Here are the paths this type of situation usually takes"
+   - NO price targets framed as advice
+   - NO urgency
+   - NO "this will happen"
+
+5. WHAT TO KEEP IN MIND (3-5 bullets)
+   - Emotional guardrails and cognitive closure
+   - Common misunderstandings
+   - Why people overreact to this type of news
+   - Goal: Actively lower stress
+   - Examples: "One good quarter doesn't guarantee future performance", "This doesn't change your investment strategy"
+
+6. SOURCES (transparent, no urgency)
+   - Array of source objects with: name, type (Primary/Secondary), reason
+   - User-facing context: "Listed so you know where info comes from — not because you need to read them"
+
+HARD RULES:
+- No buy/sell advice
+- No price targets framed as guidance
+- No urgency language ("breaking", "urgent", "must")
+- No emotional manipulation
+- No assumption of financial sophistication
+- Only mention holdings that are in the user's list above
+- Short sentences (aim <20 words)
+- Define finance terms instantly
+- Calm tone
+- If reader still has "so what?" questions → explanation is incomplete
 
 You MUST return ONLY valid JSON with this exact structure:
 {
@@ -182,14 +201,25 @@ You MUST return ONLY valid JSON with this exact structure:
         "marketAwareness": "high|medium|low",
         "action": "NO_ACTION|MONITOR|REVIEW"
       },
-      "title": "6-12 word SPECIFIC, compelling title that creates curiosity and mentions what's actually happening (use action words like 'boosting', 'driving', 'fueling' - avoid generic 'what this means'). If user has holdings, hint at how it affects them specifically. Make it irresistible to read.",
-      "summary": "1-2 sentences, max 280 chars",
-      "whyThisMattersToYou": "2-4 sentences; MUST mention holdings by name if relevant; explain WHY it matters even if indirect; use simple language",
-      "whyThisIsHappeningNow": "3-5 sentences; connect past → today; explain ALL hard terms inline with simple definitions",
-      "whatToExpect": "2-3 sentences; conditional phrasing; no predictions or urgency; use analogies when helpful",
-      "bottomLine": "1 sentence; clear and reassuring; specific to their situation",
-      "whatToWatch": ["specific item with date/event if available", "specific item 2", "specific item 3"],
-      "learn": [{"term": "...", "definition": "simple definition for non-professionals"}, ...]
+      "summary": "3-5 sentences, plain English, <15 sec read",
+      "whyItMattersForYou": "1-2 paragraphs; explicit: who affects, who doesn't; personal framing",
+      "whyThisHappened": "1-2 paragraphs; causal chain; define terms inline; use everyday examples",
+      "mostLikelyScenarios": [
+        {
+          "scenario": "Short description",
+          "likelihood": "Low|Medium|High",
+          "whatConfirmsIt": "Signal to watch for",
+          "whatMakesItUnlikely": "Counter-signals"
+        }
+      ],
+      "whatToKeepInMind": ["guardrail 1", "guardrail 2", "guardrail 3"],
+      "sources": [
+        {
+          "name": "Source name",
+          "type": "Primary|Secondary",
+          "reason": "Why this source matters"
+        }
+      ]
     }
   ]
 }
@@ -259,65 +289,71 @@ function validateExplanation(explanation, holdings) {
   const invalidTickers = [];
   const warnings = [];
 
-  // Check required fields
+  // Check required fields (6-part structure)
   if (!explanation.classification) errors.push('Missing classification');
-  if (!explanation.title || typeof explanation.title !== 'string') errors.push('Missing or invalid title');
   if (!explanation.summary || typeof explanation.summary !== 'string') errors.push('Missing or invalid summary');
-  if (!explanation.whyThisMattersToYou) errors.push('Missing whyThisMattersToYou');
-  if (!explanation.whyThisIsHappeningNow) errors.push('Missing whyThisIsHappeningNow');
-  if (!explanation.whatToExpect) errors.push('Missing whatToExpect');
-  if (!explanation.bottomLine) errors.push('Missing bottomLine');
-  if (!explanation.whatToWatch || !Array.isArray(explanation.whatToWatch)) errors.push('Missing or invalid whatToWatch');
+  if (!explanation.whyItMattersForYou) errors.push('Missing whyItMattersForYou');
+  if (!explanation.whyThisHappened) errors.push('Missing whyThisHappened');
+  if (!explanation.mostLikelyScenarios || !Array.isArray(explanation.mostLikelyScenarios)) errors.push('Missing or invalid mostLikelyScenarios');
+  if (!explanation.whatToKeepInMind || !Array.isArray(explanation.whatToKeepInMind)) errors.push('Missing or invalid whatToKeepInMind');
+  if (!explanation.sources || !Array.isArray(explanation.sources)) errors.push('Missing or invalid sources');
 
-  // Validate summary length
-  if (explanation.summary && explanation.summary.length > 280) {
-    errors.push(`Summary too long (${explanation.summary.length} chars, max 280)`);
-  }
-
-  // Validate whatToWatch length
-  if (explanation.whatToWatch && (explanation.whatToWatch.length < 2 || explanation.whatToWatch.length > 4)) {
-    errors.push(`whatToWatch must have 2-4 items (has ${explanation.whatToWatch.length})`);
-  }
-
-  // Check for personalization (if holdings exist)
-  if (holdings.length > 0 && explanation.whyThisMattersToYou) {
-    const whyMattersText = explanation.whyThisMattersToYou.toLowerCase();
-    const hasGenericPhrases = whyMattersText.includes('may affect') || 
-                             whyMattersText.includes('could impact') ||
-                             whyMattersText.includes('might influence');
-    
-    // Check if any holdings are mentioned
-    const holdingsSet = new Set(holdings.map(h => h.toUpperCase()));
-    const mentionedHoldings = holdings.filter(h => whyMattersText.includes(h.toLowerCase()));
-    
-    if (hasGenericPhrases && mentionedHoldings.length === 0) {
-      warnings.push('Generic language detected without specific holdings mention');
+  // Validate scenarios structure
+  if (explanation.mostLikelyScenarios && Array.isArray(explanation.mostLikelyScenarios)) {
+    if (explanation.mostLikelyScenarios.length < 2 || explanation.mostLikelyScenarios.length > 3) {
+      errors.push(`mostLikelyScenarios must have 2-3 items (has ${explanation.mostLikelyScenarios.length})`);
+    }
+    for (let i = 0; i < explanation.mostLikelyScenarios.length; i++) {
+      const scenario = explanation.mostLikelyScenarios[i];
+      if (!scenario.scenario) errors.push(`Scenario ${i+1}: missing scenario description`);
+      if (!['Low', 'Medium', 'High'].includes(scenario.likelihood)) errors.push(`Scenario ${i+1}: invalid likelihood (must be Low/Medium/High)`);
+      if (!scenario.whatConfirmsIt) errors.push(`Scenario ${i+1}: missing whatConfirmsIt`);
+      if (!scenario.whatMakesItUnlikely) errors.push(`Scenario ${i+1}: missing whatMakesItUnlikely`);
     }
   }
 
-  // Check for specificity in whatToWatch
-  if (explanation.whatToWatch && Array.isArray(explanation.whatToWatch)) {
-    const genericPhrases = ['watch stock reaction', 'monitor market', 'follow developments', 'track trends'];
-    const hasGeneric = explanation.whatToWatch.some(item => 
-      genericPhrases.some(phrase => item.toLowerCase().includes(phrase))
-    );
-    if (hasGeneric) {
-      warnings.push('Generic "whatToWatch" items detected - should be more specific');
+  // Validate whatToKeepInMind length
+  if (explanation.whatToKeepInMind && (explanation.whatToKeepInMind.length < 3 || explanation.whatToKeepInMind.length > 5)) {
+    warnings.push(`whatToKeepInMind should have 3-5 items (has ${explanation.whatToKeepInMind.length})`);
+  }
+
+  // Validate sources
+  if (explanation.sources && Array.isArray(explanation.sources)) {
+    if (explanation.sources.length < 1) {
+      errors.push('Must include at least 1 source');
+    }
+    for (let i = 0; i < explanation.sources.length; i++) {
+      const source = explanation.sources[i];
+      if (!source.name) errors.push(`Source ${i+1}: missing name`);
+      if (!['Primary', 'Secondary'].includes(source.type)) errors.push(`Source ${i+1}: invalid type (must be Primary/Secondary)`);
+      if (!source.reason) errors.push(`Source ${i+1}: missing reason`);
+    }
+  }
+
+  // Check for calm tone (detect urgency language)
+  const urgencyWords = ['breaking', 'urgent', 'must', 'immediately', 'critical', 'emergency'];
+  const allText = [
+    explanation.summary,
+    explanation.whyItMattersForYou,
+    explanation.whyThisHappened,
+    ...(explanation.whatToKeepInMind || [])
+  ].filter(Boolean).join(' ').toLowerCase();
+
+  for (const word of urgencyWords) {
+    if (allText.includes(word)) {
+      errors.push(`Urgency language detected: "${word}" (should be calm tone)`);
     }
   }
 
   // Extract tickers from all text fields
-  const allText = [
-    explanation.title,
+  const textToCheck = [
     explanation.summary,
-    explanation.whyThisMattersToYou,
-    explanation.whyThisIsHappeningNow,
-    explanation.whatToExpect,
-    explanation.bottomLine,
-    ...(explanation.whatToWatch || [])
+    explanation.whyItMattersForYou,
+    explanation.whyThisHappened,
+    ...(explanation.whatToKeepInMind || [])
   ].filter(Boolean).join(' ');
 
-  const foundTickers = extractTickers(allText);
+  const foundTickers = extractTickers(textToCheck);
   const holdingsSet = new Set(holdings.map(h => h.toUpperCase()));
 
   // Check if any found tickers are NOT in holdings
@@ -339,132 +375,115 @@ function validateExplanation(explanation, holdings) {
  * Generate fallback explanation for an event
  * @param {Object} event - Event object
  * @param {Array<string>} holdings - User's holdings
- * @returns {Object} Fallback explanation
+ * @returns {Object} Fallback explanation (6-part structure)
  */
 function generateFallbackExplanation(event, holdings) {
   const impactLevel = event.impactLevel || 'medium';
   const scopeType = event.scopeType || 'market';
-  const title = event.title || 'Market Update';
+  const eventTitle = event.title || 'Market Update';
 
-  // Generate SPECIFIC, compelling title for non-finance professionals (no tickers)
-  let fallbackTitle = 'Why This Market Shift Is Happening Now';
-  if (title.toLowerCase().includes('regula')) fallbackTitle = 'New Rules Are Reshaping How Companies Operate';
-  else if (title.toLowerCase().includes('rate') || title.toLowerCase().includes('fed')) {
-    if (holdings.length > 0) {
-      fallbackTitle = 'Why Interest Rate Cuts Could Boost Your Stocks';
-    } else {
-      fallbackTitle = 'The Fed\'s Rate Decision Is Shaking Up Markets';
-    }
-  }
-  else if (title.toLowerCase().includes('earning')) fallbackTitle = 'How Earnings Season Could Impact Your Portfolio';
-  else if (title.toLowerCase().includes('merger') || title.toLowerCase().includes('acquisition')) fallbackTitle = 'Why Major Companies Are Joining Forces';
-  else if (title.toLowerCase().includes('record') || title.toLowerCase().includes('high')) {
-    if (holdings.length > 0) {
-      fallbackTitle = 'Why Your Stocks Are Riding This Market Wave';
-    } else {
-      fallbackTitle = 'What\'s Driving Stock Markets to Record Highs';
-    }
-  }
-  else if (impactLevel === 'high') fallbackTitle = 'Why This Market Event Is Making Headlines';
+  const tickerNames = {
+    'AAPL': 'Apple', 'MSFT': 'Microsoft', 'GOOGL': 'Google', 'AMZN': 'Amazon',
+    'TSLA': 'Tesla', 'META': 'Meta', 'NVDA': 'Nvidia', 'JPM': 'JPMorgan',
+    'V': 'Visa', 'JNJ': 'Johnson & Johnson',
+  };
 
-  // Generate summary
-  const fallbackSummary = event.shortSummary ||
-    `Market conditions are evolving based on recent developments. This may affect the broader investment landscape.`;
+  const companyNames = holdings.length > 0
+    ? holdings.map(t => tickerNames[t.toUpperCase()] || t).join(', ')
+    : null;
 
-  // Generate whyThisMattersToYou based on holdings - IMPROVED FOR NON-PROFESSIONALS
-  let whyMatters = '';
+  // 1. SUMMARY (3-5 sentences)
+  const summary = event.shortSummary ||
+    `Markets are responding to recent developments. This reflects the normal process of financial markets adjusting to new information. Changes like these happen regularly as economic conditions evolve.`;
+
+  // 2. WHY IT MATTERS FOR YOU (explicit who/who doesn't)
+  let whyItMattersForYou = '';
   if (holdings.length > 0) {
-    const holdingsList = holdings.join(', ');
-    // Try to extract company names from common tickers
-    const tickerNames = {
-      'AAPL': 'Apple',
-      'MSFT': 'Microsoft',
-      'GOOGL': 'Google',
-      'AMZN': 'Amazon',
-      'TSLA': 'Tesla',
-      'META': 'Meta (Facebook)',
-      'NVDA': 'Nvidia',
-      'JPM': 'JPMorgan',
-      'V': 'Visa',
-      'JNJ': 'Johnson & Johnson',
-    };
-    
-    const companyNames = holdings.map(t => tickerNames[t.toUpperCase()] || t).join(', ');
-    
-    whyMatters = `If you own ${companyNames} stock, this news creates a ${impactLevel === 'high' ? 'more significant' : 'moderate'} impact on the market environment. `;
-    whyMatters += `Think of it like a ripple effect - even if this doesn't directly change your ${companyNames} shares, it affects the overall market mood that influences all investments. `;
-    whyMatters += `Understanding these shifts helps you stay informed about what's happening in the investment world.`;
+    whyItMattersForYou = `If you own ${companyNames}, this news affects the market environment around your investments. It does NOT mean you should buy more or sell now. `;
+    whyItMattersForYou += `For those without these holdings, this may not directly impact you right now. `;
+    whyItMattersForYou += `Understanding the context helps you feel less anxious about normal market activity.`;
   } else {
-    whyMatters = 'This development reflects broader market dynamics. Understanding these trends helps you make informed investment decisions as you build your portfolio. ' +
-      `Think of it like weather patterns - even if you're not directly affected, knowing what's happening helps you plan better.`;
+    whyItMattersForYou = `This development affects the broader market, even if you don't have specific investments yet. `;
+    whyItMattersForYou += `It's part of normal economic cycles. Understanding these trends helps you build confidence as you grow your portfolio.`;
   }
 
-  // Generate whyThisIsHappeningNow - IMPROVED WITH EDUCATION
-  let whyNow = `This situation is unfolding as markets respond to recent announcements and changes. `;
+  // 3. WHY THIS HAPPENED (causal chain, define terms)
+  let whyThisHappened = '';
   if (scopeType === 'regulatory') {
-    whyNow += `Regulatory changes (new rules from government agencies) often create uncertainty as companies figure out how to comply. `;
+    whyThisHappened = `Government agencies periodically introduce new rules (called regulations) to govern how companies operate. `;
+    whyThisHappened += `These changes typically aim to protect consumers or ensure fair markets. `;
+    whyThisHappened += `Companies need time to adjust their operations to comply, which creates temporary uncertainty.`;
   } else if (scopeType === 'macro') {
-    whyNow += `Macroeconomic events (big-picture economic trends) affect the entire market, not just individual companies. `;
-  } else {
-    whyNow += `These types of developments typically take weeks to fully materialize as details become clearer. `;
-  }
-  whyNow += `The immediate reaction reflects investors processing new information and adjusting their expectations. `;
-  whyNow += `This is normal market behavior - prices and sentiment change as news is digested.`;
-
-  // Generate whatToExpect - IMPROVED WITH ANALOGIES
-  const whatExpect = `If current conditions persist, you can expect continued market discussions and analysis over the coming weeks. ` +
-    `Think of it like a news story that develops over time - more details will emerge, and the full picture will become clearer. ` +
-    `The situation will likely evolve as more information becomes available and companies respond. ` +
-    `This is normal, so you don't need to make any immediate changes to your investment strategy.`;
-
-  // Generate bottomLine - IMPROVED TO BE MORE REASSURING AND SPECIFIC
-  let bottomLine = '';
-  if (holdings.length > 0) {
-    if (impactLevel === 'high') {
-      bottomLine = 'This creates some uncertainty in the market, but your investments are still part of a diversified portfolio that can weather these changes.';
-    } else if (event.opportunitySignal === 'positive') {
-      bottomLine = 'This is generally positive news for the market environment, which could be supportive for your investments over time.';
-    } else if (event.opportunitySignal === 'negative') {
-      bottomLine = 'This creates some headwinds, but it doesn\'t change the fundamental value of your investments - market fluctuations are normal.';
-    } else {
-      bottomLine = 'This doesn\'t change anything significant for your investments right now - it\'s part of normal market activity.';
-    }
-  } else {
-    bottomLine = 'This is part of normal market dynamics - understanding these trends helps you make informed decisions as you build your portfolio.';
-  }
-
-  // Generate whatToWatch - IMPROVED TO BE MORE SPECIFIC
-  const whatToWatch = [];
-  
-  if (scopeType === 'regulatory') {
-    whatToWatch.push('Implementation timeline for new regulations (watch for specific dates)');
-    whatToWatch.push('Company responses and compliance announcements');
-    whatToWatch.push('Sector-wide impact as rules take effect');
-  } else if (scopeType === 'macro') {
-    whatToWatch.push('Upcoming economic data releases (check calendar for dates)');
-    whatToWatch.push('Central bank statements and policy decisions');
-    whatToWatch.push('Market sentiment indicators over the next few weeks');
+    whyThisHappened = `Large economic trends (called macroeconomic events) affect the entire financial system. `;
+    whyThisHappened += `Things like interest rate changes, inflation shifts, or employment trends influence how companies perform. `;
+    whyThisHappened += `Markets react to these changes as investors adjust their expectations about future company earnings.`;
   } else if (scopeType === 'earnings') {
-    whatToWatch.push('Upcoming earnings reports from major companies');
-    whatToWatch.push('Analyst expectations vs. actual results');
-    whatToWatch.push('Company guidance for future quarters');
+    whyThisHappened = `Companies regularly report their financial results (called earnings). `;
+    whyThisHappened += `When results exceed or miss expectations, markets react based on what this means for the company's future. `;
+    whyThisHappened += `This is normal and expected behavior as investors process new financial data.`;
   } else {
-    whatToWatch.push('Follow-up announcements from key institutions');
-    whatToWatch.push('Broader market reaction and sector trends');
-    whatToWatch.push('Industry analyst perspectives and company responses');
+    whyThisHappened = `This situation unfolded as markets responded to new information. `;
+    whyThisHappened += `Investors process this data and adjust their views about future prospects. `;
+    whyThisHappened += `This is a natural part of how financial markets function.`;
   }
 
-  // Add learn terms for non-professionals
-  const learn = [];
-  if (scopeType === 'regulatory') {
-    learn.push({ term: 'Regulatory changes', definition: 'New rules or policies from government agencies that affect how companies operate' });
-  }
-  if (scopeType === 'macro') {
-    learn.push({ term: 'Macroeconomic events', definition: 'Big-picture economic trends that affect the entire market, not just individual companies' });
-  }
+  // 4. MOST LIKELY SCENARIOS (2-3 scenarios with structure)
+  const scenarios = [];
+
+  scenarios.push({
+    scenario: 'Situation stabilizes within 2-4 weeks',
+    likelihood: 'Medium',
+    whatConfirmsIt: `Market volatility decreases; news coverage fades; investors adjust and move on`,
+    whatMakesItUnlikely: `Ongoing negative developments; major economic deterioration; regulatory escalation`
+  });
+
   if (impactLevel === 'high') {
-    learn.push({ term: 'Market volatility', definition: 'Normal ups and downs in stock prices as investors react to news' });
+    scenarios.push({
+      scenario: 'Market overreacts temporarily with sharp price swings',
+      likelihood: 'Medium',
+      whatConfirmsIt: `Stock prices move 5%+ in either direction; emotional trading increases`,
+      whatMakesItUnlikely: `Markets remain calm; pricing remains stable; minimal trading volume`
+    });
   }
+
+  scenarios.push({
+    scenario: 'Situation evolves gradually with minor ongoing adjustments',
+    likelihood: 'Low',
+    whatConfirmsIt: `News continues trickling out; prices shift incrementally; gradual repricing`,
+    whatMakesItUnlikely: `Sudden resolution; clear outcome emerges quickly; market stabilizes`
+  });
+
+  // 5. WHAT TO KEEP IN MIND (3-5 emotional guardrails)
+  const whatToKeepInMind = [
+    'Market volatility is normal. Price swings happen regularly and are part of healthy markets.',
+    holdings.length > 0
+      ? `Your investment strategy is based on your long-term goals, not daily events. Don't change your plan based on news cycles.`
+      : `Building wealth takes time. Single events rarely derail long-term plans.`,
+    'It\'s common to feel the urge to "do something" when you hear news. Resist that urge. Most investors who stay calm outperform those who react emotionally.',
+    'Media coverage tends to emphasize dramatic stories. That\'s their job, not a signal that you need to act.',
+    holdings.length > 0
+      ? `Checking your portfolio daily increases anxiety without improving outcomes. Trust your diversification.`
+      : `The market will always have noise. Focus on understanding long-term trends, not daily headlines.`
+  ];
+
+  // 6. SOURCES (transparent)
+  const sources = [
+    {
+      name: event.rawArticles && event.rawArticles.length > 0 ? event.rawArticles[0].source : 'Financial News',
+      type: 'Secondary',
+      reason: 'News coverage and market analysis'
+    },
+    {
+      name: 'Federal Reserve / Central Bank Data',
+      type: 'Primary',
+      reason: 'Official economic and policy information'
+    },
+    {
+      name: 'Market Data & Historical Patterns',
+      type: 'Primary',
+      reason: 'Context for how similar situations typically resolve'
+    }
+  ];
 
   return {
     classification: {
@@ -473,14 +492,12 @@ function generateFallbackExplanation(event, holdings) {
       marketAwareness: impactLevel === 'high' ? 'high' : 'medium',
       action: impactLevel === 'high' ? 'MONITOR' : 'NO_ACTION',
     },
-    title: fallbackTitle,
-    summary: fallbackSummary.substring(0, 280),
-    whyThisMattersToYou: whyMatters,
-    whyThisIsHappeningNow: whyNow,
-    whatToExpect: whatExpect,
-    bottomLine: bottomLine,
-    whatToWatch: whatToWatch,
-    learn: learn,
+    summary,
+    whyItMattersForYou,
+    whyThisHappened,
+    mostLikelyScenarios: scenarios,
+    whatToKeepInMind,
+    sources,
   };
 }
 
