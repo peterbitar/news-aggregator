@@ -995,9 +995,549 @@ async function enrichArticlesForHoldings(articles, holdings, options = {}, triag
   return allArticles;
 }
 
+/**
+ * Cluster articles by title using LLM
+ * LLM analyzes all titles at once and groups them by story
+ * @param {Array} articles - Array of article objects
+ * @returns {Promise<Array>} Array of clusters (each cluster is array of articles)
+ */
+async function clusterArticlesByTitleLLM(articles) {
+  if (!process.env.OPENAI_API_KEY) {
+    console.warn("OPENAI_API_KEY not configured, falling back to keyword clustering");
+    const { clusterArticlesBySimilarity } = require('../data/storyGroupStorage');
+    return clusterArticlesBySimilarity(articles, 0.85);
+  }
+
+  try {
+    // Prepare titles list for LLM
+    const titlesList = articles.map((article, index) => 
+      `${index + 1}. ${article.title}`
+    ).join('\n');
+
+    // System prompt
+    const systemPrompt = `You are a news analyst that groups articles by story.
+
+Your job: Analyze the article titles below and group them by which ones are about the SAME story or event.
+
+Rules:
+- Articles are about the SAME story if they report the same event, announcement, or development
+- Different angles on the same story = SAME group
+- Different sources reporting the same news = SAME group
+- Related but separate events = DIFFERENT groups
+- Follow-up articles about the same story = SAME group
+
+Return JSON in this exact format:
+{
+  "groups": [
+    {
+      "group_id": 1,
+      "article_indices": [1, 3, 5],
+      "story_summary": "Brief description of what this story is about"
+    },
+    {
+      "group_id": 2,
+      "article_indices": [2, 4],
+      "story_summary": "Brief description of what this story is about"
+    }
+  ],
+  "ungrouped": [6, 7]
+}
+
+Important:
+- article_indices are 1-based (first article is 1, not 0)
+- Each article can only be in ONE group
+- If an article doesn't match any others, put it in "ungrouped"
+- Create groups only if 2+ articles are about the same story`;
+
+    // User prompt
+    const userPrompt = `Analyze these ${articles.length} article titles and group them by story:
+
+${titlesList}
+
+Return JSON with groups. Each group should contain articles that are about the SAME story.`;
+
+    // Call OpenAI API
+    const response = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      max_tokens: 2000,
+    });
+
+    // Parse response
+    const content = response.choices[0].message.content;
+    let groupingData;
+    
+    try {
+      groupingData = JSON.parse(content);
+    } catch (parseError) {
+      console.error("Failed to parse LLM grouping response:", parseError);
+      const jsonMatch = content.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
+      if (jsonMatch) {
+        groupingData = JSON.parse(jsonMatch[1]);
+      } else {
+        throw new Error("Invalid JSON response from LLM");
+      }
+    }
+
+    // Convert LLM groups to article clusters
+    const clusters = [];
+    const assigned = new Set();
+
+    // Process groups
+    if (groupingData.groups && Array.isArray(groupingData.groups)) {
+      for (const group of groupingData.groups) {
+        if (!group.article_indices || !Array.isArray(group.article_indices)) continue;
+
+        const cluster = [];
+        for (const index of group.article_indices) {
+          const articleIndex = index - 1; // Convert 1-based to 0-based
+          if (articleIndex >= 0 && articleIndex < articles.length) {
+            const article = articles[articleIndex];
+            if (!assigned.has(article.url)) {
+              cluster.push({
+                ...article,
+                similarity_score: 0.95,
+                llm_group_summary: group.story_summary || ''
+              });
+              assigned.add(article.url);
+            }
+          }
+        }
+
+        if (cluster.length > 0) {
+          clusters.push(cluster);
+        }
+      }
+    }
+
+    // Process ungrouped articles (each becomes its own cluster)
+    if (groupingData.ungrouped && Array.isArray(groupingData.ungrouped)) {
+      for (const index of groupingData.ungrouped) {
+        const articleIndex = index - 1;
+        if (articleIndex >= 0 && articleIndex < articles.length) {
+          const article = articles[articleIndex];
+          if (!assigned.has(article.url)) {
+            clusters.push([article]);
+            assigned.add(article.url);
+          }
+        }
+      }
+    }
+
+    // Add any articles that weren't included in LLM response
+    for (let i = 0; i < articles.length; i++) {
+      if (!assigned.has(articles[i].url)) {
+        clusters.push([articles[i]]);
+      }
+    }
+
+    console.log(`✓ LLM grouped ${articles.length} articles into ${clusters.length} clusters`);
+    return clusters;
+
+  } catch (error) {
+    console.error("Error clustering articles by title with LLM:", error.message);
+    // Fallback to keyword clustering
+    const { clusterArticlesBySimilarity } = require('../data/storyGroupStorage');
+    return clusterArticlesBySimilarity(articles, 0.85);
+  }
+}
+
+/**
+ * Generate story group explanation using LLM with strict orientation-focused prompt
+ * @param {Array} articles - Array of clustered article objects
+ * @param {String} groupTitle - Story group title
+ * @param {String} scope - 'GLOBAL' or 'TICKER'
+ * @param {String} primaryTicker - Ticker symbol if TICKER scope
+ * @param {String} impactLevel - 'High', 'Moderate', 'Low', 'Very Low'
+ * @returns {Promise<Object>} Explanation object with all 6 required parts
+ */
+async function generateStoryGroupExplanation(articles, groupTitle, scope, primaryTicker, impactLevel) {
+  if (!process.env.OPENAI_API_KEY) {
+    console.warn("OPENAI_API_KEY not configured, using fallback");
+    return null;
+  }
+
+  try {
+    // Prepare article context
+    const articleTexts = articles.map((a, idx) => 
+      `Article ${idx + 1}:
+Title: ${a.title}
+${a.description ? `Description: ${a.description}` : ''}
+Source: ${a.source_name}
+${a.published_at ? `Published: ${a.published_at}` : ''}`
+    ).join('\n\n---\n\n');
+
+    const sources = articles.map(a => ({
+      publisher: a.source_name,
+      title: a.title,
+      published_date: a.published_at || 'N/A',
+      url: a.url
+    }));
+
+    // System prompt (exact prompt from user)
+    const systemPrompt = `You are an orientation-focused explanation engine, not a trading assistant.
+
+Your job is to help readers understand what is happening, why it happened, and what it means for them, in a way that reduces anxiety, avoids hype, and creates closure.
+
+You do not:
+
+Predict prices
+
+Recommend buying, selling, or reallocating
+
+Create urgency, fear, or excitement
+
+Use hype language, speculation, or social sentiment
+
+You do:
+
+Explain calmly
+
+Translate finance into plain language
+
+Respect the reader's intelligence
+
+Leave the reader feeling oriented, not activated
+
+🎯 CORE GOAL (NON-NEGOTIABLE)
+
+When the reader finishes, they should:
+
+Feel calmer than when they started
+
+Understand the story without Googling further
+
+Know what signals matter and which ones don't
+
+Decide for themselves whether to care or ignore
+
+If the explanation increases urgency, confusion, or FOMO — it fails.
+
+👤 AUDIENCE
+
+You are writing for non-finance professionals:
+
+Curious adults
+
+Parents
+
+Busy professionals
+
+Long-term investors
+
+Assume no finance background.
+
+Grade level: 6–8
+Sentence length: short
+Tone: calm, grounded, human
+
+🧩 REQUIRED OUTPUT STRUCTURE
+
+You MUST follow this order exactly.
+All sections are required. No extra sections.
+
+1️⃣ Summary
+
+Length:
+
+High impact: 4–6 short sentences
+
+Moderate impact: 3–4 short sentences
+
+Rules:
+
+Plain English
+
+No jargon unless immediately explained
+
+Readable in under 20 seconds
+
+No conclusions yet
+
+2️⃣ Why this matters for you
+
+Rules:
+
+Make it more interpretive, less informational
+
+Answer: Why should I mentally care about this?
+
+Use the user's portfolio if relevant (we know their holdings, so be direct)
+
+Focus on interpretation, not consequence
+
+IMPORTANT: Use "Since you hold [TICKER]..." NOT "If you hold..." - we know the user's holdings, so be direct and confident
+
+Avoid phrases like "this may affect your investments" or "this is important for investors"
+
+No action framing
+
+Avoid generic phrases like "market participants" or "portfolio construction"
+
+Good:
+"Since you hold Bitcoin, these discussions about its price and market activity are relevant to your interests."
+"Since you hold GOOGL stock, the company's recent success and advancements in AI are directly relevant to your interests."
+
+Bad:
+"If you hold Bitcoin..." (don't use conditional - we know they hold it)
+"This is important for investors and markets."
+"This may affect your investments."
+
+3️⃣ How this unfolded
+
+MANDATORY: a 3-part causal narrative
+
+Format as 3 short paragraphs (1–2 sentences each)
+
+Each paragraph = one causal beat
+
+No numbering, no bullets, no labels (no "Step 1", "Step 2", "Step 3")
+
+Causality must remain clear and chronological
+
+Rules:
+
+No speculation
+
+If the cause is unclear, say so plainly
+
+Translate all finance terms inline
+
+Example translation style:
+
+"Liquidity" → "how easily people can get cash"
+
+"Funding markets" → "the short-term borrowing banks use day to day"
+
+Read like a calm story, not instructions
+
+Never leave this section empty.
+
+4️⃣ Most likely scenarios
+
+Provide 2–3 bounded scenarios.
+
+Each scenario MUST include:
+
+A short title
+
+Likelihood: Low / Medium / High
+
+What would make it more likely
+
+Rules:
+
+These are paths, not predictions
+
+Do NOT include price targets
+
+Do NOT use words like "bullish", "bearish", "soon", "set to"
+
+5️⃣ What to keep in mind
+
+This is the emotional guardrail section.
+
+Include EXACTLY:
+
+2 common misunderstandings people may have
+
+Calm reframes that reduce overreaction
+
+Optional: One grounding analogy if helpful (weather, traffic, routines)
+
+Goal: prevent spiraling or false conclusions
+
+End this section with a sense of closure, not a warning
+
+Ensure the reader feels oriented and calm, not anxious or pressured.
+
+6️⃣ Sources
+
+List real sources transparently.
+
+Format:
+
+Publisher
+
+Article title
+
+Published date
+
+URL
+
+Rules:
+
+No urgency language
+
+No commentary
+
+Sources are for trust, not persuasion
+
+🗣 LANGUAGE RULES (STRICT)
+
+You MUST:
+
+Use short sentences (one idea per sentence)
+
+Prefer common words over technical ones
+
+Explain every finance term inline
+
+Explain why things connect, not just that they do
+
+Prefer examples over abstractions (but no metaphors in "How this unfolded")
+
+Avoid drama, metaphors of collapse, or hero narratives
+
+You MUST NOT:
+
+Use "bullish", "bearish", "reclaim", "set to", "explodes", "crashes"
+
+Use "investors", "market participants", "risk management"
+
+Use second-person pressure ("you should", "you must", "watch closely")
+
+Use action framing ("this may affect your investments", "this could impact your portfolio")
+
+🧪 SUCCESS TEST (SELF-CHECK)
+
+Before finalizing, ask yourself:
+
+Would a non-finance reader understand this fully?
+
+Does this reduce anxiety rather than create it?
+
+Is the reader free to ignore this without fear?
+
+Is there a clear sense of closure at the end?
+
+If any answer is "no", rewrite.
+
+⛔ HARD FAIL CONDITIONS
+
+The output is invalid if:
+
+Any section is missing
+
+Causes are vague or generic
+
+Language creates urgency or fear
+
+It sounds like advice or prediction
+
+It assumes financial expertise
+
+✅ FINAL REMINDER
+
+You are not here to make the reader act.
+You are here to help the reader orient themselves calmly.
+
+Write accordingly.`;
+
+    // User prompt
+    const userPrompt = `Story Group Title: "${groupTitle}"
+
+Impact Level: ${impactLevel}
+Scope: ${scope}
+${primaryTicker ? `Primary Ticker: ${primaryTicker} (user holds this stock)` : 'Global story (affects all market participants)'}
+
+Clustered Articles (${articles.length} articles about the same story):
+${articleTexts}
+
+Generate a complete explanation following the 5-part structure exactly:
+
+1. Summary (${impactLevel === 'High' ? '4-6' : '3-4'} short sentences, plain English, explain connections not just facts)
+2. Why this matters for you (interpretive, answer "Why should I mentally care?", use "Since you hold [TICKER]..." format - we know their holdings, no action framing)
+3. How this unfolded (3 short paragraphs, 1-2 sentences each, narrative causal chain, no numbering/bullets/labels, chronological)
+4. Most likely scenarios (2-3 scenarios, each with title, likelihood, what makes it likely) - KEEP EXACTLY AS-IS
+5. What to keep in mind (2 misunderstandings + calm reframes + optional analogy, end with closure not warning)
+6. Sources (list all sources from articles above)
+
+Return ONLY valid JSON in this exact format:
+{
+  "summary": "string",
+  "why_this_matters_for_you": "string",
+  "how_this_unfolded": "string (3 short paragraphs, narrative format, no numbering)",
+  "most_likely_scenarios": [
+    {
+      "title": "string",
+      "likelihood": "Low|Medium|High",
+      "what_makes_it_likely": "string"
+    }
+  ],
+  "what_to_keep_in_mind": "string",
+  "sources": [
+    {
+      "publisher": "string",
+      "title": "string",
+      "published_date": "string",
+      "url": "string"
+    }
+  ]
+}
+
+CRITICAL: Follow all language rules. No hype, no urgency, no predictions, no trading advice.`;
+
+    // Call OpenAI API
+    const response = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.3,
+      response_format: { type: "json_object" },
+      max_tokens: 2500,
+    });
+
+    // Parse JSON response
+    const content = response.choices[0].message.content;
+    let explanationData;
+    
+    try {
+      explanationData = JSON.parse(content);
+    } catch (parseError) {
+      console.error("Failed to parse LLM JSON response:", parseError);
+      const jsonMatch = content.match(/```(?:json)?\s*(\{[\s\S]*\})\s*```/);
+      if (jsonMatch) {
+        explanationData = JSON.parse(jsonMatch[1]);
+      } else {
+        throw new Error("Invalid JSON response from LLM");
+      }
+    }
+
+    // Map to database format
+    return {
+      what_happened: explanationData.summary || '',
+      why_it_happened: explanationData.how_this_unfolded || explanationData.why_this_happened || '',
+      why_it_matters_now: explanationData.why_this_matters_for_you || '',
+      what_to_watch_next: explanationData.most_likely_scenarios 
+        ? explanationData.most_likely_scenarios.map((s, i) => 
+            `${i + 1}) ${s.title} (${s.likelihood} likelihood): ${s.what_makes_it_likely}`
+          ).join('\n\n')
+        : '',
+      what_this_does_not_mean: explanationData.what_to_keep_in_mind || '',
+      sources_summary: explanationData.sources || sources,
+      cause_confidence: 'High',
+      cause_reason: 'Analysis based on multiple news sources and verifiable facts.'
+    };
+
+  } catch (error) {
+    console.error("Error generating story group explanation:", error.message);
+    return null;
+  }
+}
+
 module.exports = {
   enrichArticleForHoldings,
   enrichArticlesForHoldings,
   triageArticlesByTitle,
+  clusterArticlesByTitleLLM,
+  generateStoryGroupExplanation,
 };
 

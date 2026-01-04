@@ -3,7 +3,16 @@
  * Fetches news articles from external APIs and saves them to the database
  */
 
-const { fetchNewsFromMultipleSources, fetchArticlesForHoldings, resetGNewsRateLimit } = require("../integrations/newsProviders");
+const {
+  fetchNewsFromMultipleSources,
+  fetchArticlesForHoldings,
+  resetGNewsRateLimit,
+  fetchFromCNBCRSS,
+  fetchFromMarketWatchRSS,
+  fetchFromCoinDeskRSS,
+  fetchFromReutersRSS,
+  fetchFromFinancialTimesRSS
+} = require("../integrations/newsProviders");
 const { getDatabase } = require("../data/db");
 
 const DEFAULT_USER_ID = 1;
@@ -46,9 +55,10 @@ async function runIngest() {
     if (holdings.length > 0) {
       console.log(`[Ingest Job] BUCKET 1: Fetching targeted news for ${holdings.length} holdings`);
       // Dev mode: use lower limits (2-3 per source)
-      const holdingsSourceLimits = isDev 
-        ? { newsapi: 3, gnews: 2, googlerss: 3 }
-        : { newsapi: 5, gnews: 5, googlerss: 5 };
+      // MVP: Google RSS disabled due to redirect failures (85% failure rate)
+      const holdingsSourceLimits = isDev
+        ? { newsapi: 3, gnews: 2, googlerss: 0 }
+        : { newsapi: 5, gnews: 5, googlerss: 0 };
       const holdingsArticles = await fetchArticlesForHoldings(holdings, {
         sourceLimits: holdingsSourceLimits,
       });
@@ -89,16 +99,17 @@ async function runIngest() {
     const articlesPerQuery = Math.ceil(MACRO_CAP / macroQueries.length);
     
     // Dev mode: lower per-source limits (2-3 instead of 10)
+    // MVP: Google RSS disabled due to redirect failures (85% failure rate)
     const sourceLimitsPerQuery = isDev
       ? {
           newsapi: Math.min(articlesPerQuery, 3),
           gnews: Math.min(articlesPerQuery, 2),
-          googlerss: Math.min(articlesPerQuery, 3)
+          googlerss: 0
         }
       : {
           newsapi: Math.min(articlesPerQuery, 10),
           gnews: Math.min(articlesPerQuery, 10),
-          googlerss: Math.min(articlesPerQuery, 10)
+          googlerss: 0
         };
     
     console.log(`[Ingest Job] BUCKET 2: Source limits per query:`, sourceLimitsPerQuery);
@@ -131,7 +142,27 @@ async function runIngest() {
     allArticles.push(...macroArticles);
     console.log(`[Ingest Job] BUCKET 2: Fetched ${macroArticles.length} macro/market articles`);
 
-    // Deduplicate across both buckets
+    // BUCKET 3: Direct RSS Feeds (free sources with direct publisher URLs)
+    console.log(`[Ingest Job] BUCKET 3: Fetching from direct RSS feeds (CNBC, MarketWatch, CoinDesk, Financial Times)`);
+
+    const rssLimit = isDev ? 5 : 10; // Fetch 5 articles per feed in dev, 10 in prod
+    const rssResults = await Promise.all([
+      fetchFromCNBCRSS({ maxArticles: rssLimit }),
+      fetchFromMarketWatchRSS({ maxArticles: rssLimit }),
+      fetchFromCoinDeskRSS({ maxArticles: rssLimit }),
+      // fetchFromReutersRSS({ maxArticles: rssLimit }), // Reuters RSS feeds are restricted/require auth
+      fetchFromFinancialTimesRSS({ maxArticles: rssLimit })
+    ]);
+
+    const rssArticles = rssResults.flat().map(article => ({
+      ...article,
+      searched_by: "RSS", // Tag as RSS source
+    }));
+
+    allArticles.push(...rssArticles);
+    console.log(`[Ingest Job] BUCKET 3: Fetched ${rssArticles.length} articles from direct RSS feeds`);
+
+    // Deduplicate across all buckets
     const { deduplicateArticles } = require("../integrations/newsProviders");
     const uniqueArticles = deduplicateArticles(allArticles);
     

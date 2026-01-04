@@ -15,8 +15,9 @@ function saveArticles(articles, searchedBy = null) {
     INSERT INTO articles (
       url, source_id, source_name, author, title, description,
       url_to_image, published_at, content, searched_by, feed_source, 
+      original_url, final_url, display_domain,
       last_scraped_at, scrape_count, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now'))
     ON CONFLICT(url) DO UPDATE SET
       -- Only update basic fields that might change
       source_id = excluded.source_id,
@@ -61,6 +62,22 @@ function saveArticles(articles, searchedBy = null) {
           AND (articles.feed_source IS NULL OR articles.feed_source = '')
         THEN excluded.feed_source
         ELSE articles.feed_source
+      END,
+      -- Update URL fields (original_url, final_url, display_domain)
+      original_url = CASE
+        WHEN excluded.original_url IS NOT NULL AND excluded.original_url != ''
+        THEN excluded.original_url
+        ELSE articles.original_url
+      END,
+      final_url = CASE
+        WHEN excluded.final_url IS NOT NULL AND excluded.final_url != ''
+        THEN excluded.final_url
+        ELSE articles.final_url
+      END,
+      display_domain = CASE
+        WHEN excluded.display_domain IS NOT NULL AND excluded.display_domain != ''
+        THEN excluded.display_domain
+        ELSE articles.display_domain
       END,
       -- Update scrape tracking
       last_scraped_at = datetime('now'),
@@ -110,6 +127,9 @@ function saveArticles(articles, searchedBy = null) {
           article.content ? article.content.trim() : null,
           searchedBy || article.searchedBy || null,
           article.feedSource || null,
+          article.original_url || null,
+          article.final_url || null,
+          article.display_domain || null,
           now, // last_scraped_at
           // scrape_count is set in SQL (1 for new, +1 for existing)
         );
@@ -538,18 +558,17 @@ function clearAllArticles() {
 function getFeedArticles(options = {}) {
   const { limit = 100, from, to, sources, minScore = 40, holdings } = options;
   const db = getDatabase();
-  
-  // Show articles that are personalized (Stage 4 complete) or ranked (Stage 5 complete)
-  // CRITICAL: Only show articles that:
-  // 1. Match holdings in searched_by field
-  // 2. Have a relevance score (profile_adjusted_score or final_rank_score)
+
+  // MVP: Feed fallback policy
+  // Try 1: ranked/personalized articles (preferred)
+  // Try 2: llm_processed articles (fallback if feed is empty)
   let sql = `
     SELECT * FROM articles
     WHERE (status = 'personalized' OR status = 'ranked')
       AND status != 'discarded'
       AND (
         -- Must have a relevance score (either profile_adjusted_score or final_rank_score)
-        profile_adjusted_score IS NOT NULL 
+        profile_adjusted_score IS NOT NULL
         OR final_rank_score IS NOT NULL
       )
       AND (
@@ -600,10 +619,49 @@ function getFeedArticles(options = {}) {
     sql += " ORDER BY COALESCE(final_rank_score, profile_adjusted_score) DESC, profile_adjusted_score DESC, published_at DESC LIMIT ?";
     params.push(limit);
   }
-  
+
   try {
-    const rows = db.prepare(sql).all(...params);
-    
+    let rows = db.prepare(sql).all(...params);
+
+    // MVP: Fallback policy - if ranked/personalized feed is empty, try llm_processed articles
+    if (rows.length === 0) {
+      console.log(`[getFeedArticles] Primary feed empty, trying fallback to llm_processed articles`);
+
+      // Fallback query: llm_processed articles with impact_score
+      let fallbackSql = `
+        SELECT * FROM articles
+        WHERE status = 'llm_processed'
+          AND status != 'discarded'
+          AND impact_score IS NOT NULL
+          AND impact_score >= ?
+      `;
+      const fallbackParams = [Math.max(minScore / 2, 15)]; // Lower threshold for fallback (min 15)
+
+      // Apply same filters
+      if (sources && Array.isArray(sources) && sources.length > 0) {
+        const placeholders = sources.map(() => "?").join(",");
+        fallbackSql += ` AND feed_source IN (${placeholders})`;
+        fallbackParams.push(...sources);
+      }
+
+      if (from) {
+        fallbackSql += " AND published_at >= ?";
+        fallbackParams.push(from);
+      }
+
+      if (to) {
+        fallbackSql += " AND published_at <= ?";
+        fallbackParams.push(to);
+      }
+
+      // Add ordering and limit
+      fallbackSql += " ORDER BY impact_score DESC, published_at DESC LIMIT ?";
+      fallbackParams.push(limit);
+
+      rows = db.prepare(fallbackSql).all(...fallbackParams);
+      console.log(`[getFeedArticles] Fallback query returned ${rows.length} articles`);
+    }
+
     return rows.map(row => {
       // Parse relevance scores from JSON if available
       let relevanceScores = {};
@@ -621,9 +679,9 @@ function getFeedArticles(options = {}) {
           name: row.source_name,
         },
         author: row.author,
-        title: row.personalized_title || row.title, // Use personalized title if available
+        title: row.title,
         description: row.description,
-        url: row.url,
+        url: row.final_url || row.url, // Use final_url if available (decoded Google RSS), fallback to original url
         urlToImage: row.url_to_image,
         publishedAt: row.published_at,
         content: row.content,
@@ -633,8 +691,8 @@ function getFeedArticles(options = {}) {
       // Add all enrichment data
       return {
         ...article,
-        summary: row.summary_short || row.summary_medium || row.summary_enriched || "",
-        whyItMatters: row.why_it_matters || row.personalized_teaser || "",
+        summary: "", // Not currently generated
+        whyItMatters: "", // Not currently generated
         relevanceScores: relevanceScores,
         // Add pipeline metadata
         impactScore: row.impact_score,
@@ -648,7 +706,9 @@ function getFeedArticles(options = {}) {
         volatilityScore: row.volatility_score,
         matchedTickers: row.matched_tickers ? JSON.parse(row.matched_tickers) : [],
         matchedSectors: row.matched_sectors ? JSON.parse(row.matched_sectors) : [],
-        matchedHoldings: row.matched_holdings ? JSON.parse(row.matched_holdings) : [],
+        // matchedHoldings is computed on the fly in Stage 4, not stored
+        // Return final_url for article links
+        finalUrl: row.final_url || row.url,
         isPrimaryInCluster: row.is_primary_in_cluster === 1,
         clusterId: row.cluster_id,
       };
@@ -661,18 +721,23 @@ function getFeedArticles(options = {}) {
 
 /**
  * Get ranked articles for v1 feed (Signal DTO format)
- * Returns articles with status='ranked', prioritized by holdings but NOT gated by holdings
- * Holdings are used ONLY for prioritization/ranking, not filtering
+ * 
+ * Feed Behavior: STRICT - Only returns articles with status='ranked'
+ * No fallback to 'personalized' status. Articles must complete Stage 5 (ranking) to appear in feed.
+ * 
+ * Holdings are used ONLY for prioritization/ranking (in Stage 4), not filtering
  * @param {Object} options - Options for filtering (limit, userId)
  * @returns {Array} Array of database rows (not mapped to Signal yet)
  */
 function getRankedForFeed(options = {}) {
+  const scoring = require("../config/scoring");
   const { limit = 20, userId = 1 } = options;
   const db = getDatabase();
   
   // Holdings boost is applied in Stage 4 (personalization), not here at feed time
   // Feed simply returns ranked articles ordered by final_rank_score (which already includes holdings boost from Stage 4)
-  const FEED_RANK_THRESHOLD = 40; // Minimum score to appear in feed
+  // STRICT: Only status='ranked' articles appear in feed (no fallback to 'personalized')
+  const FEED_RANK_THRESHOLD = scoring.FEED_RANK_THRESHOLD; // Minimum score to appear in feed
   const rows = db.prepare(`
     SELECT * FROM articles
     WHERE status = 'ranked'

@@ -212,48 +212,216 @@ function transformGoogleRSSArticle(rssItem) {
 }
 
 /**
+ * Allowed domains for Google RSS redirects
+ * 
+ * IMPORTANT: This allowlist is for redirect safety/validation only.
+ * It does NOT imply these sources are fetchable.
+ * 
+ * Some domains (Bloomberg, WSJ, FT) may be paywalled and not fetchable.
+ * fetchableSources (used in deferredArticleEvaluator) remains separate
+ * and should only include sources you have tested and confirmed work.
+ * 
+ * This allowlist prevents following redirects to:
+ * - Tracker domains
+ * - Malicious domains
+ * - Unverified domains
+ * 
+ * But it does NOT guarantee the article is fetchable.
+ */
+const ALLOWED_REDIRECT_DOMAINS = [
+  'reuters.com',
+  'bloomberg.com',  // Paywalled, but safe for redirect validation
+  'wsj.com',        // Paywalled, but safe for redirect validation
+  'ft.com',         // Paywalled, but safe for redirect validation
+  'nytimes.com',
+  'washingtonpost.com',
+  'theguardian.com',
+  'cnbc.com',
+  'marketwatch.com',
+  'barrons.com',
+  'morningstar.com',
+  'yahoo.com',
+  'finance.yahoo.com',
+  'cnn.com',
+  'bbc.com',
+  'cbsnews.com',
+  'foxbusiness.com',
+  'businessinsider.com',
+  'euronews.com',
+  'ksat.com',
+  'eastidahonews.com',
+  'coindesk.com',
+  'ap.org',
+  'apnews.com',
+  // Add more trusted news domains as needed
+];
+
+/**
+ * Block obvious redirect/tracker domains
+ */
+const BLOCKED_DOMAINS = [
+  'google.com',
+  'googletagmanager.com',
+  'doubleclick.net',
+  'google-analytics.com',
+  'facebook.com',
+  'twitter.com',
+  'linkedin.com',
+  // Add more tracker/redirect domains
+];
+
+/**
+ * Check if domain is in allowlist
+ */
+function isAllowedDomain(url) {
+  try {
+    const urlObj = new URL(url);
+    const hostname = urlObj.hostname.toLowerCase().replace(/^www\./, '');
+    
+    // Check against allowlist
+    return ALLOWED_REDIRECT_DOMAINS.some(allowed => 
+      hostname === allowed || hostname.endsWith('.' + allowed)
+    );
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * Check if domain is blocked
+ */
+function isBlockedDomain(url) {
+  try {
+    const urlObj = new URL(url);
+    const hostname = urlObj.hostname.toLowerCase();
+
+    // Explicitly allow news.google.com (legitimate Google News RSS redirect service)
+    if (hostname === 'news.google.com') {
+      return false;
+    }
+
+    return BLOCKED_DOMAINS.some(blocked =>
+      hostname === blocked || hostname.endsWith('.' + blocked)
+    );
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
  * Decode Google RSS URL to get actual article URL
  * 
- * DOCUMENTATION: Google RSS feeds return encoded URLs that need to be decoded.
- * The following Python code shows how to decode them (NOT YET IMPLEMENTED):
- * 
- * ```python
- * import requests
- * import json
- * from bs4 import BeautifulSoup
- * 
- * google_rss_url = 'https://news.google.com/rss/articles/CBMiWkFVX3lxTE1qZ1V2bUVCeXlNbElxeFI2WWVLeVVUM3pBaGhmWHlpWThlZ2…'
- * 
- * resp = requests.get(google_rss_url)
- * data = BeautifulSoup(resp.text, 'html.parser').select_one('c-wiz[data-p]').get('data-p')
- * obj = json.loads(data.replace('%.@.', '["garturlreq",'))
- * 
- * payload = {
- *     'f.req': json.dumps([[['Fbv4je', json.dumps(obj[:-6] + obj[-2:]), 'null', 'generic']]])
- * }
- * 
- * headers = {
- *   'content-type': 'application/x-www-form-urlencoded;charset=UTF-8',
- *   'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
- * }
- * 
- * url = "https://news.google.com/_/DotsSplashUi/data/batchexecute"
- * response = requests.post(url, headers=headers, data=payload)
- * array_string = json.loads(response.text.replace(")]}'", ""))[0][2]
- * article_url = json.loads(array_string)[1]
- * 
- * print(article_url)
- * ```
- * 
- * TODO: Implement this decoding logic in JavaScript/Node.js
- * For now, we use the RSS link directly (which may be a Google redirect URL)
+ * Uses HEAD request with redirect following, falls back to GET with Range header.
+ * Validates final URL against allowlist/blocklist for safety.
  * 
  * @param {string} googleRssUrl - The encoded Google RSS URL
- * @returns {Promise<string>} - The decoded article URL (currently returns input URL)
+ * @returns {Promise<string>} - The decoded article URL (or original if decode fails)
  */
 async function decodeGoogleRSSUrl(googleRssUrl) {
-  // TODO: Implement URL decoding logic
-  // For now, return the URL as-is
+  // Check config for strict mode (default: true in prod, false in dev)
+  const STRICT_REDIRECT_ALLOWLIST = process.env.STRICT_REDIRECT_ALLOWLIST !== 'false';
+  
+  // Method 1: Try HEAD request
+  try {
+    const headResponse = await axios.head(googleRssUrl, {
+      timeout: 5000,
+      maxRedirects: 5,
+      validateStatus: (status) => status < 400,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+    });
+    
+    // Extract final URL from redirect chain
+    const finalUrl = headResponse.request?.res?.responseUrl || 
+                    headResponse.headers?.location || 
+                    googleRssUrl;
+    
+    // Validate domain (strict allowlist)
+    if (finalUrl && finalUrl !== googleRssUrl) {
+      // Reject if still on Google domain (incomplete redirect)
+      const finalUrlObj = new URL(finalUrl);
+      if (finalUrlObj.hostname.includes('google.com')) {
+        console.warn(`Redirect chain incomplete (still on Google): ${finalUrl}, using original`);
+        return googleRssUrl;
+      }
+
+      if (isBlockedDomain(finalUrl)) {
+        console.warn(`Blocked redirect domain for ${googleRssUrl}, using original`);
+        return googleRssUrl;
+      }
+
+      if (isAllowedDomain(finalUrl)) {
+        return finalUrl;
+      }
+
+      // Not in allowlist (strict mode fallback)
+      if (STRICT_REDIRECT_ALLOWLIST) {
+        console.warn(`Redirect to non-allowlisted domain (strict mode): ${finalUrl}, using original`);
+        return googleRssUrl; // Fallback to original in strict mode
+      } else {
+        // Permissive mode: log but return it
+        console.log(`Redirect to non-allowlisted domain (permissive mode): ${finalUrl}`);
+        return finalUrl;
+      }
+    }
+  } catch (headError) {
+    // HEAD failed, try GET with Range header (lightweight)
+    console.log(`HEAD failed for ${googleRssUrl}, trying GET with Range...`);
+  }
+  
+  // Method 2: GET with Range: bytes=0-0 (lightweight fallback)
+  try {
+    const getResponse = await axios.get(googleRssUrl, {
+      timeout: 5000,
+      maxRedirects: 5,
+      validateStatus: (status) => status < 400,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Range': 'bytes=0-0', // Lightweight request
+      },
+    });
+    
+    // Extract final URL from redirect chain
+    const finalUrl = getResponse.request?.res?.responseUrl || 
+                    getResponse.headers?.location || 
+                    googleRssUrl;
+    
+    // Validate domain (strict allowlist)
+    if (finalUrl && finalUrl !== googleRssUrl) {
+      // Reject if still on Google domain (incomplete redirect)
+      const finalUrlObj = new URL(finalUrl);
+      if (finalUrlObj.hostname.includes('google.com')) {
+        console.warn(`Redirect chain incomplete (still on Google): ${finalUrl}, using original`);
+        return googleRssUrl;
+      }
+
+      if (isBlockedDomain(finalUrl)) {
+        console.warn(`Blocked redirect domain for ${googleRssUrl}, using original`);
+        return googleRssUrl;
+      }
+
+      if (isAllowedDomain(finalUrl)) {
+        return finalUrl;
+      }
+
+      // Not in allowlist (strict mode fallback)
+      if (STRICT_REDIRECT_ALLOWLIST) {
+        console.warn(`Redirect to non-allowlisted domain (strict mode): ${finalUrl}, using original`);
+        return googleRssUrl; // Fallback to original in strict mode
+      } else {
+        // Permissive mode: log but return it
+        console.log(`Redirect to non-allowlisted domain (permissive mode): ${finalUrl}`);
+        return finalUrl;
+      }
+    }
+  } catch (getError) {
+    // GET with Range also failed
+    console.warn(`GET with Range failed for ${googleRssUrl}`);
+  }
+  
+  // Fallback: if all methods fail, use original
+  console.warn(`Failed to decode Google RSS URL: ${googleRssUrl}, using original`);
   return googleRssUrl;
 }
 
@@ -405,9 +573,21 @@ async function fetchFromGoogleRSS(query, options = {}) {
         
         // Validate article before adding
         if (article.url && article.title) {
-          // TODO: Decode Google RSS URL to get actual article URL
-          // For now, we use the RSS link directly
-          // article.url = await decodeGoogleRSSUrl(article.url);
+          // Decode Google RSS URL to get actual article URL
+          const originalUrl = article.url;
+          const finalUrl = await decodeGoogleRSSUrl(originalUrl);
+          
+          // Store both original and final URLs
+          article.original_url = originalUrl;
+          article.url = finalUrl; // Use final URL as primary
+          
+          // Extract display domain from final URL
+          try {
+            const urlObj = new URL(finalUrl);
+            article.display_domain = urlObj.hostname.replace(/^www\./, '');
+          } catch (e) {
+            article.display_domain = null;
+          }
           
           articles.push(article);
         } else {
@@ -429,6 +609,146 @@ async function fetchFromGoogleRSS(query, options = {}) {
     console.error("Error fetching from Google RSS:", errorMsg || error.message);
     return [];
   }
+}
+
+// ========== Direct RSS Feed Sources ==========
+/**
+ * Generic direct RSS fetcher (for non-Google RSS feeds with direct publisher URLs)
+ * Unlike Google RSS, these feeds provide direct article URLs without redirect chains
+ */
+async function fetchFromDirectRSS(rssUrl, sourceName, options = {}) {
+  const { maxArticles = 10 } = options;
+
+  console.log(`[${sourceName}] Fetching from RSS feed: ${rssUrl}`);
+
+  try {
+    const response = await axios.get(rssUrl, {
+      timeout: 10000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+      },
+    });
+
+    if (!response.data) {
+      console.error(`[${sourceName}] Empty response from RSS feed`);
+      return [];
+    }
+
+    // Parse XML RSS feed
+    const parsed = await parseXML(response.data, {
+      explicitArray: true,
+      mergeAttrs: false,
+      explicitRoot: true,
+      ignoreAttrs: false,
+      trim: true,
+      normalize: true,
+      normalizeTags: false,
+    });
+
+    // Extract channel and items
+    let channel = null;
+    let items = [];
+
+    if (parsed.rss && parsed.rss.channel) {
+      channel = Array.isArray(parsed.rss.channel) ? parsed.rss.channel[0] : parsed.rss.channel;
+    } else if (parsed.feed) {
+      channel = Array.isArray(parsed.feed) ? parsed.feed[0] : parsed.feed;
+    }
+
+    if (!channel) {
+      console.error(`[${sourceName}] Invalid RSS structure`);
+      return [];
+    }
+
+    if (channel.item) {
+      items = Array.isArray(channel.item) ? channel.item : [channel.item];
+    } else if (channel.entry) {
+      items = Array.isArray(channel.entry) ? channel.entry : [channel.entry];
+    }
+
+    if (!items || items.length === 0) {
+      console.log(`[${sourceName}] No items in RSS feed`);
+      return [];
+    }
+
+    console.log(`[${sourceName}] RSS feed returned ${items.length} items, processing ${Math.min(items.length, maxArticles)}`);
+
+    // Transform items to standard format
+    const articles = [];
+    for (const item of items.slice(0, maxArticles)) {
+      try {
+        const title = extractRSSField(item.title);
+        const link = extractRSSField(item.link);
+        const description = extractRSSField(item.description);
+        const pubDate = parseRSSDate(item);
+
+        if (link && title) {
+          articles.push({
+            source: { id: null, name: sourceName },
+            author: null,
+            title: title.trim(),
+            description: description || null,
+            url: link.trim(),
+            urlToImage: null,
+            publishedAt: pubDate,
+            content: description || null,
+            feedSource: sourceName.toLowerCase().replace(/\s+/g, ''),
+          });
+        }
+      } catch (error) {
+        console.error(`[${sourceName}] Error transforming article:`, error.message);
+      }
+    }
+
+    console.log(`[${sourceName}] Successfully fetched ${articles.length} articles`);
+    return articles;
+  } catch (error) {
+    console.error(`[${sourceName}] Error fetching RSS:`, error.message);
+    return [];
+  }
+}
+
+/**
+ * CNBC RSS Feed - Direct publisher URLs, no redirect chains
+ */
+async function fetchFromCNBCRSS(options = {}) {
+  const rssUrl = 'https://www.cnbc.com/id/100003114/device/rss/rss.html'; // Top News
+  return fetchFromDirectRSS(rssUrl, 'CNBC', options);
+}
+
+/**
+ * MarketWatch RSS Feed - Direct publisher URLs
+ */
+async function fetchFromMarketWatchRSS(options = {}) {
+  const rssUrl = 'https://www.marketwatch.com/rss/topstories'; // Top Stories
+  return fetchFromDirectRSS(rssUrl, 'MarketWatch', options);
+}
+
+/**
+ * CoinDesk RSS Feed - Direct publisher URLs (crypto news)
+ */
+async function fetchFromCoinDeskRSS(options = {}) {
+  const rssUrl = 'https://www.coindesk.com/arc/outboundfeeds/rss/'; // All articles
+  return fetchFromDirectRSS(rssUrl, 'CoinDesk', options);
+}
+
+/**
+ * Reuters RSS Feed - Direct publisher URLs (business news)
+ * Note: Reuters RSS feeds may require authentication or have been restricted
+ * This is a fallback implementation that may need updates
+ */
+async function fetchFromReutersRSS(options = {}) {
+  const rssUrl = 'https://www.reuters.com/arc/outboundfeeds/news/?outputType=xml'; // General news feed
+  return fetchFromDirectRSS(rssUrl, 'Reuters', options);
+}
+
+/**
+ * Financial Times RSS Feed - Direct publisher URLs (business/finance news)
+ */
+async function fetchFromFinancialTimesRSS(options = {}) {
+  const rssUrl = 'https://www.ft.com/?format=rss'; // Main feed
+  return fetchFromDirectRSS(rssUrl, 'Financial Times', options);
 }
 
 /**
@@ -741,12 +1061,15 @@ async function fetchNewsFromMultipleSources(query, options = {}) {
     fetchPromises.push(Promise.resolve([]));
   }
   
-  if (fetchGoogleRSS) {
-    const googlerssLimit = limits.googlerss || 10;
+  if (fetchGoogleRSS && limits.googlerss > 0) {
+    const googlerssLimit = limits.googlerss;
     console.log(`[fetchNewsFromMultipleSources] ✅ Fetching from Google RSS (limit: ${googlerssLimit})...`);
     fetchPromises.push(fetchFromGoogleRSS(query, { maxArticles: googlerssLimit, from, to }));
   } else {
-    console.log(`[fetchNewsFromMultipleSources] ❌ Skipping Google RSS (not in sources: ${JSON.stringify(normalizedSources)})`);
+    const skipReason = !fetchGoogleRSS
+      ? `not in sources: ${JSON.stringify(normalizedSources)}`
+      : `limit is 0 (disabled)`;
+    console.log(`[fetchNewsFromMultipleSources] ❌ Skipping Google RSS (${skipReason})`);
     fetchPromises.push(Promise.resolve([]));
   }
 
@@ -837,7 +1160,7 @@ async function fetchArticlesForHoldings(holdings, options = {}) {
 
     // Add ONE financial context keyword to help filter noise
     // Philosophy: Keep it simple - most providers don't support complex boolean
-    // Just add "stock" or "price" to filter out entertainment/celebrity news
+    // Just add "stock" to filter out entertainment/celebrity news
     const baseQuery = baseParts.join(" OR ");
     const query = `${baseQuery} stock`;
 
@@ -897,6 +1220,11 @@ module.exports = {
   fetchFromGNews,
   fetchFromNewsAPI,
   fetchFromGoogleRSS,
+  fetchFromCNBCRSS,
+  fetchFromMarketWatchRSS,
+  fetchFromCoinDeskRSS,
+  fetchFromReutersRSS,
+  fetchFromFinancialTimesRSS,
   fetchNewsFromMultipleSources,
   fetchArticlesForHoldings,
   deduplicateArticles,

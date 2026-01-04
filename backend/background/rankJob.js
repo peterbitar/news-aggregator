@@ -29,8 +29,8 @@ async function runRank() {
     
     // Get personalized articles that need ranking (limit 50)
     const articlesToRank = db.prepare(`
-      SELECT url, title, personalized_title, profile_adjusted_score, impact_score,
-             published_at, event_type, matched_tickers, matched_holdings
+      SELECT url, title, profile_adjusted_score, impact_score,
+             published_at, event_type, matched_tickers
       FROM articles
       WHERE status = 'personalized'
         AND status != 'discarded'
@@ -44,7 +44,8 @@ async function runRank() {
       return 0;
     }
 
-    const result = await processRankingClustering(articlesToRank, 50);
+    const scoring = require("../config/scoring");
+    const result = await processRankingClustering(articlesToRank, scoring.FEED_RANK_THRESHOLD);
     console.log(`[Rank Job] Complete: ${result.ranked || 0} articles ranked`);
     return result.ranked || 0;
   } catch (error) {

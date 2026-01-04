@@ -7,9 +7,7 @@
  */
 
 const { getDatabase } = require("../data/db");
-
-// Process gate threshold: only fetch full content if likely_impact >= this
-const PROCESS_GATE_THRESHOLD = 30; // Lower than feed threshold to allow more through
+const scoring = require("../config/scoring");
 
 /**
  * Decide likely impact from lightweight metadata only
@@ -66,6 +64,8 @@ function decideImpactLite(article) {
   }
   
   // Source quality boost (reputable sources get slight boost)
+  // Source quality is a small allowlist-based bonus using source_name normalization;
+  // unknown sources get 0. This is a simple substring match on normalized source_name.
   const sourceName = (articleRow.source_name || "").toLowerCase();
   const reputableSources = ["reuters", "bloomberg", "wsj", "financial times", "cnbc", "marketwatch"];
   if (reputableSources.some(s => sourceName.includes(s))) {
@@ -85,7 +85,10 @@ function decideImpactLite(article) {
 
   // Dynamic threshold: Lower for curated daily snapshot philosophy
   // We want meaningful insights, not aggressive filtering
-  const threshold = (bucket === "HOLDINGS") ? 10 : 15;
+  // Use thresholds from config
+  const threshold = (bucket === "HOLDINGS") 
+    ? scoring.PROCESS_GATE_HOLDINGS 
+    : scoring.PROCESS_GATE_MACRO;
   
   // Decision: should we fetch full content?
   const should_fetch = likely_impact >= threshold;
@@ -111,6 +114,7 @@ function decideImpactLite(article) {
 
 module.exports = {
   decideImpactLite,
-  PROCESS_GATE_THRESHOLD,
+  // Legacy export for backwards compatibility
+  PROCESS_GATE_THRESHOLD: scoring.PROCESS_GATE_THRESHOLD,
 };
 

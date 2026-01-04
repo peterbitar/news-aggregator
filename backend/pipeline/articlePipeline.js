@@ -7,6 +7,9 @@ const { processPersonalization } = require("./stage4_personalization");
 const { processRankingClustering } = require("./stage5_rankingClustering");
 const { StageProcessor } = require("./StageProcessor");
 const ThresholdConfig = require("./ThresholdConfig");
+const { normalizeUrl } = require("../utils/urlNormalizer");
+const { hammingDistance } = require("../utils/contentFingerprint");
+const scoring = require("../config/scoring");
 const {
   createStage1Config,
   createStage1_5Config,
@@ -85,6 +88,9 @@ class ArticlePipeline {
       return { status: "low_priority", stage: 1.5, likely_impact: impactGuess.likely_impact };
     }
 
+    // Note: Stage 1.5 gate overrides should_fetch_full from Stage 1.
+    // The process gate (likely_impact >= threshold) is the final decision.
+
     // Stage 2: Content fetching (only if likely_impact passes gate)
     console.log(`[Pipeline] Stage 2: Content fetch for ${article.url} (likely_impact: ${impactGuess.likely_impact})`);
     const stage2Result = await processContentFetch(article);
@@ -102,6 +108,14 @@ class ArticlePipeline {
     if (stage2Result.status !== "content_fetched") {
       console.log(`[Pipeline] Content fetch failed for ${article.url}, will retry later`);
       return { status: "fetch_pending", stage: 2 };
+    }
+
+    // Deduplication step: Check for duplicates before expensive Stage 3
+    console.log(`[Pipeline] Deduplication check for ${article.url}`);
+    const dedupResult = await this.deduplicateArticle(article);
+    if (dedupResult.isDuplicate) {
+      console.log(`[Pipeline] Article is duplicate of ${dedupResult.originalId}, skipping Stage 3`);
+      return { status: "duplicate", stage: "dedup", originalId: dedupResult.originalId };
     }
 
     // Stage 3: Content classification
@@ -178,7 +192,7 @@ class ArticlePipeline {
       options
     });
 
-    const { llmBatchSize = 20, stage3BatchSize = 8, delayBetweenBatches = 1000 } = options;
+    const { llmBatchSize = scoring.STAGE1_BATCH_SIZE, stage3BatchSize = scoring.STAGE3_BATCH_SIZE, delayBetweenBatches = 1000 } = options;
     const results = [];
 
     // Processing context shared across all stages
@@ -232,7 +246,7 @@ class ArticlePipeline {
    * @returns {Promise<Object>} Object with immediateResults and backgroundPromise
    */
   async processBatchIncremental(articles, userHoldings = [], userProfile = "balanced", options = {}) {
-    const { topN = 30, llmBatchSize = 20, stage3BatchSize = 8 } = options;
+    const { topN = 30, llmBatchSize = scoring.STAGE1_BATCH_SIZE, stage3BatchSize = scoring.STAGE3_BATCH_SIZE } = options;
     
     if (!articles || articles.length === 0) {
       return {
@@ -332,6 +346,326 @@ class ArticlePipeline {
       article.content || null,
       article.searchedBy || null
     );
+  }
+
+  /**
+   * Deduplication step after Stage 2, before Stage 3
+   * Uses candidate selection to avoid expensive full comparison
+   */
+  async deduplicateArticle(article) {
+    const db = getDatabase();
+    
+    // Get article data from database
+    const articleRow = db.prepare(`
+      SELECT id, url, canonical_url, content_fingerprint, normalized_url, 
+             normalized_domain, title_hash_bucket, published_at, title
+      FROM articles WHERE url = ?
+    `).get(article.url);
+    
+    if (!articleRow) {
+      return { isDuplicate: false };
+    }
+    
+    // Step 1: Normalize URLs
+    const normalizedUrl = articleRow.normalized_url || normalizeUrl(articleRow.url);
+    const canonicalUrl = articleRow.canonical_url || null;
+    const contentFingerprint = articleRow.content_fingerprint || null;
+    
+    // Step 2: Candidate selection (DB-agnostic timestamp)
+    // Check how published_at is stored in DB and use matching format
+    const sampleArticle = db.prepare("SELECT published_at FROM articles WHERE published_at IS NOT NULL LIMIT 1").get();
+    let cutoffTimestamp;
+    
+    if (sampleArticle && sampleArticle.published_at) {
+      const sampleValue = String(sampleArticle.published_at);
+      
+      // Check if it's all digits (epoch) or ISO string
+      if (/^\d+$/.test(sampleValue)) {
+        // It's epoch - determine if seconds or milliseconds
+        const isMilliseconds = sampleValue.length >= 13; // >= 13 digits = milliseconds
+        
+        if (isMilliseconds) {
+          // DB stores epoch in milliseconds
+          cutoffTimestamp = Date.now() - 48 * 60 * 60 * 1000;
+        } else {
+          // DB stores epoch in seconds
+          cutoffTimestamp = Math.floor((Date.now() - 48 * 60 * 60 * 1000) / 1000);
+        }
+      } else {
+        // It's ISO string format
+        cutoffTimestamp = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+      }
+    } else {
+      // Default to ISO string (most common)
+      cutoffTimestamp = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    }
+    
+    const titleHash = articleRow.title_hash_bucket || generateTitleHashBucket(articleRow.title || '');
+    
+    // Guard against normalizedUrl being null
+    let domain = null;
+    try {
+      if (normalizedUrl) {
+        domain = new URL(normalizedUrl).hostname.replace(/^www\./, '');
+      }
+    } catch (error) {
+      // normalizedUrl is invalid/null, skip domain candidate logic
+      console.warn(`Invalid normalizedUrl for article ${articleRow.id}, skipping domain candidate check`);
+    }
+    
+    // Dedup runs only for articles that reached content_fetched (after Stage 2).
+    // Candidates that haven't passed Stage 2 won't have canonical_url or content_fingerprint anyway.
+
+    // Build candidate query (DB-agnostic)
+    // If domain is null, skip domain-based candidate check
+    // Only compare against successfully fetched articles (content_fetched or later)
+    // Exclude discarded and already-marked duplicates
+    const candidates = db.prepare(`
+      SELECT id, url, canonical_url, content_fingerprint, normalized_url, status
+      FROM articles
+      WHERE (
+        -- Same canonical URL
+        (? IS NOT NULL AND canonical_url = ?)
+        OR
+        -- Same domain + recent (within 48h) - only if domain is valid
+        (? IS NOT NULL AND normalized_domain = ? AND published_at >= ?)
+        OR
+        -- Same title hash bucket
+        (title_hash_bucket = ?)
+      )
+      AND id != ?
+      AND status != 'duplicate'
+      AND status != 'discarded'
+      AND (status = 'content_fetched' OR status = 'llm_processed' OR status = 'personalized' OR status = 'ranked')
+      LIMIT 50
+    `).all(
+      canonicalUrl, canonicalUrl,
+      domain, domain, cutoffTimestamp,  // domain check only if domain is not null
+      titleHash,
+      articleRow.id
+    );
+    
+    // Step 3: Check duplicates by priority
+    for (const candidate of candidates) {
+      // Priority 1: Normalized URL match
+      if (normalizedUrl) {
+        const candidateNormalized = candidate.normalized_url || normalizeUrl(candidate.url);
+        if (normalizedUrl === candidateNormalized) {
+          // Mark as duplicate
+          db.prepare(`
+            UPDATE articles SET
+              is_duplicate_of_article_id = ?,
+              status = 'duplicate',
+              updated_at = datetime('now')
+            WHERE url = ?
+          `).run(candidate.id, article.url);
+          return { isDuplicate: true, originalId: candidate.id, reason: 'normalized_url' };
+        }
+      }
+      
+      // Priority 2: Canonical URL match
+      if (canonicalUrl && candidate.canonical_url && canonicalUrl === candidate.canonical_url) {
+        // Mark as duplicate
+        db.prepare(`
+          UPDATE articles SET
+            is_duplicate_of_article_id = ?,
+            status = 'duplicate',
+            updated_at = datetime('now')
+          WHERE url = ?
+        `).run(candidate.id, article.url);
+        return { isDuplicate: true, originalId: candidate.id, reason: 'canonical_url' };
+      }
+      
+      // Priority 3: Content fingerprint similarity
+      // Only compare fingerprints if candidate has successfully fetched content
+      if (contentFingerprint && candidate.content_fingerprint && 
+          (candidate.status === 'content_fetched' || candidate.status === 'llm_processed' || 
+           candidate.status === 'personalized' || candidate.status === 'ranked')) {
+        const distance = hammingDistance(contentFingerprint, candidate.content_fingerprint);
+        if (distance <= scoring.SIMHASH_DUP_THRESHOLD) {
+          // Mark as duplicate
+          db.prepare(`
+            UPDATE articles SET
+              is_duplicate_of_article_id = ?,
+              status = 'duplicate',
+              updated_at = datetime('now')
+            WHERE url = ?
+          `).run(candidate.id, article.url);
+          return { isDuplicate: true, originalId: candidate.id, reason: 'content_fingerprint' };
+        }
+      }
+    }
+    
+    return { isDuplicate: false };
+  }
+
+  /**
+   * Generate title hash bucket (first 3 words) for candidate selection
+   */
+  generateTitleHashBucket(title) {
+    if (!title) return '';
+    const words = title.toLowerCase().split(/\s+/).slice(0, 3);
+    return words.join('_');
+  }
+
+  /**
+   * Deduplication step after Stage 2, before Stage 3
+   * Uses candidate selection to avoid expensive full comparison
+   */
+  async deduplicateArticle(article) {
+    const db = getDatabase();
+    
+    // Get article data from database
+    const articleRow = db.prepare(`
+      SELECT id, url, canonical_url, content_fingerprint, normalized_url, 
+             normalized_domain, title_hash_bucket, published_at, title
+      FROM articles WHERE url = ?
+    `).get(article.url);
+    
+    if (!articleRow) {
+      return { isDuplicate: false };
+    }
+    
+    // Step 1: Normalize URLs
+    const normalizedUrl = articleRow.normalized_url || normalizeUrl(articleRow.url);
+    const canonicalUrl = articleRow.canonical_url || null;
+    const contentFingerprint = articleRow.content_fingerprint || null;
+    
+    // Step 2: Candidate selection (DB-agnostic timestamp)
+    // Check how published_at is stored in DB and use matching format
+    const sampleArticle = db.prepare("SELECT published_at FROM articles WHERE published_at IS NOT NULL LIMIT 1").get();
+    let cutoffTimestamp;
+    
+    if (sampleArticle && sampleArticle.published_at) {
+      const sampleValue = String(sampleArticle.published_at);
+      
+      // Check if it's all digits (epoch) or ISO string
+      if (/^\d+$/.test(sampleValue)) {
+        // It's epoch - determine if seconds or milliseconds
+        const isMilliseconds = sampleValue.length >= 13; // >= 13 digits = milliseconds
+        
+        if (isMilliseconds) {
+          // DB stores epoch in milliseconds
+          cutoffTimestamp = Date.now() - 48 * 60 * 60 * 1000;
+        } else {
+          // DB stores epoch in seconds
+          cutoffTimestamp = Math.floor((Date.now() - 48 * 60 * 60 * 1000) / 1000);
+        }
+      } else {
+        // It's ISO string format
+        cutoffTimestamp = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+      }
+    } else {
+      // Default to ISO string (most common)
+      cutoffTimestamp = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+    }
+    
+    const titleHash = articleRow.title_hash_bucket || this.generateTitleHashBucket(articleRow.title || '');
+    
+    // Guard against normalizedUrl being null
+    let domain = null;
+    try {
+      if (normalizedUrl) {
+        domain = new URL(normalizedUrl).hostname.replace(/^www\./, '');
+      }
+    } catch (error) {
+      // normalizedUrl is invalid/null, skip domain candidate logic
+      console.warn(`Invalid normalizedUrl for article ${articleRow.id}, skipping domain candidate check`);
+    }
+    
+    // Dedup runs only for articles that reached content_fetched (after Stage 2).
+    // Candidates that haven't passed Stage 2 won't have canonical_url or content_fingerprint anyway.
+
+    // Build candidate query (DB-agnostic)
+    // If domain is null, skip domain-based candidate check
+    // Only compare against successfully fetched articles (content_fetched or later)
+    // Exclude discarded and already-marked duplicates
+    const candidates = db.prepare(`
+      SELECT id, url, canonical_url, content_fingerprint, normalized_url, status
+      FROM articles
+      WHERE (
+        -- Same canonical URL
+        (? IS NOT NULL AND canonical_url = ?)
+        OR
+        -- Same domain + recent (within 48h) - only if domain is valid
+        (? IS NOT NULL AND normalized_domain = ? AND published_at >= ?)
+        OR
+        -- Same title hash bucket
+        (title_hash_bucket = ?)
+      )
+      AND id != ?
+      AND status != 'duplicate'
+      AND status != 'discarded'
+      AND (status = 'content_fetched' OR status = 'llm_processed' OR status = 'personalized' OR status = 'ranked')
+      LIMIT 50
+    `).all(
+      canonicalUrl, canonicalUrl,
+      domain, domain, cutoffTimestamp,  // domain check only if domain is not null
+      titleHash,
+      articleRow.id
+    );
+    
+    // Step 3: Check duplicates by priority
+    for (const candidate of candidates) {
+      // Priority 1: Normalized URL match
+      if (normalizedUrl) {
+        const candidateNormalized = candidate.normalized_url || normalizeUrl(candidate.url);
+        if (normalizedUrl === candidateNormalized) {
+          // Mark as duplicate
+          db.prepare(`
+            UPDATE articles SET
+              is_duplicate_of_article_id = ?,
+              status = 'duplicate',
+              updated_at = datetime('now')
+            WHERE url = ?
+          `).run(candidate.id, article.url);
+          return { isDuplicate: true, originalId: candidate.id, reason: 'normalized_url' };
+        }
+      }
+      
+      // Priority 2: Canonical URL match
+      if (canonicalUrl && candidate.canonical_url && canonicalUrl === candidate.canonical_url) {
+        // Mark as duplicate
+        db.prepare(`
+          UPDATE articles SET
+            is_duplicate_of_article_id = ?,
+            status = 'duplicate',
+            updated_at = datetime('now')
+          WHERE url = ?
+        `).run(candidate.id, article.url);
+        return { isDuplicate: true, originalId: candidate.id, reason: 'canonical_url' };
+      }
+      
+      // Priority 3: Content fingerprint similarity
+      // Only compare fingerprints if candidate has successfully fetched content
+      if (contentFingerprint && candidate.content_fingerprint && 
+          (candidate.status === 'content_fetched' || candidate.status === 'llm_processed' || 
+           candidate.status === 'personalized' || candidate.status === 'ranked')) {
+        const distance = hammingDistance(contentFingerprint, candidate.content_fingerprint);
+        if (distance <= scoring.SIMHASH_DUP_THRESHOLD) {
+          // Mark as duplicate
+          db.prepare(`
+            UPDATE articles SET
+              is_duplicate_of_article_id = ?,
+              status = 'duplicate',
+              updated_at = datetime('now')
+            WHERE url = ?
+          `).run(candidate.id, article.url);
+          return { isDuplicate: true, originalId: candidate.id, reason: 'content_fingerprint' };
+        }
+      }
+    }
+    
+    return { isDuplicate: false };
+  }
+
+  /**
+   * Generate title hash bucket (first 3 words) for candidate selection
+   */
+  generateTitleHashBucket(title) {
+    if (!title) return '';
+    const words = title.toLowerCase().split(/\s+/).slice(0, 3);
+    return words.join('_');
   }
 
   /**

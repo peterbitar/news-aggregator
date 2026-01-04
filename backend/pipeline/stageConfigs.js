@@ -14,7 +14,7 @@ function createStage1Config(llmBatchSize) {
   return {
     stageName: "Title Triage",
     stageNumber: 1,
-    batchSize: llmBatchSize,
+    batchSize: llmBatchSize || scoring.STAGE1_BATCH_SIZE,
     customSkipReasons: {
       alreadyProcessed: 0,
       alreadyDiscarded: 0
@@ -219,7 +219,7 @@ function createStage3Config(stage3BatchSize) {
   return {
     stageName: "Content Classification",
     stageNumber: 3,
-    batchSize: stage3BatchSize,
+    batchSize: stage3BatchSize || scoring.STAGE3_BATCH_SIZE,
     customSkipReasons: {
       notFound: 0,
       discarded: 0,

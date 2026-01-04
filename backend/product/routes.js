@@ -11,6 +11,8 @@ const { mapArticleRowsToSignals } = require("./signalMapper");
 const { enforceSignalGuardrails } = require("../decisions/guardrails");
 const { getUserHoldings } = require("../services/userHoldingsService");
 const { generateRabbitExplanations, attachExplanations } = require("../services/rabbitPersonalizationService");
+const { fetchArticlesForHoldings } = require("../integrations/newsProviders");
+const { getGlobalStoryGroups, getTickerStoryGroups } = require("../data/storyGroupStorage");
 
 const router = express.Router();
 
@@ -85,11 +87,13 @@ router.get("/feed", async (req, res) => {
  * GET /v1/personalized-feed
  * Returns personalized feed with Wealthy Rabbit explanations
  *
- * This endpoint:
- * 1. Gets the same ranked articles as /v1/feed
- * 2. Fetches user holdings
- * 3. Generates Wealthy Rabbit personalized explanations
- * 4. Returns articles with explanation objects attached
+ * HYBRID APPROACH:
+ * 1. Fetches user holdings
+ * 2. Actively searches for news about user's holdings (70% of feed)
+ * 3. Gets general ranked news for macro context (30% of feed)
+ * 4. Combines and deduplicates articles
+ * 5. Generates Wealthy Rabbit personalized explanations
+ * 6. Returns articles with explanation objects attached
  */
 router.get("/personalized-feed", async (req, res) => {
   try {
@@ -98,38 +102,104 @@ router.get("/personalized-feed", async (req, res) => {
 
     console.log(`[v1/personalized-feed] Request for user ${userId}, limit: ${limit}`);
 
-    // Step A: Get ranked articles (same as /v1/feed)
-    const articles = getRankedForFeed({ limit, userId });
-
-    if (!articles || articles.length === 0) {
-      console.log('[v1/personalized-feed] No articles found');
-      return res.json({ items: [] });
-    }
-
-    console.log(`[v1/personalized-feed] Found ${articles.length} ranked articles`);
-
-    // Step B: Fetch user holdings
+    // Step A: Fetch user holdings FIRST
     const holdings = getUserHoldings(userId);
     console.log(`[v1/personalized-feed] User has ${holdings.length} holdings: ${holdings.join(', ') || 'none'}`);
 
-    // Step C: Build event objects from articles
-    // Convert database rows to event format expected by personalization service
-    const events = articles.map(article => {
-      // Parse matched_holdings if available
+    let allArticles = [];
+    const urlSet = new Set(); // For deduplication
+
+    // Step B: If user has holdings, actively search for holdings-specific news (70% of feed)
+    if (holdings.length > 0) {
+      const holdingsLimit = Math.ceil(limit * 0.7);
+      console.log(`[v1/personalized-feed] Searching for ${holdingsLimit} holdings-specific articles...`);
+      
+      try {
+        // Fetch articles for each holding
+        // Limit per holding to avoid too many API calls
+        const articlesPerHolding = Math.max(3, Math.ceil(holdingsLimit / holdings.length));
+        const holdingsArticles = await fetchArticlesForHoldings(holdings, {
+          sourceLimits: { newsapi: articlesPerHolding, gnews: articlesPerHolding, googlerss: articlesPerHolding }
+        });
+
+        console.log(`[v1/personalized-feed] Found ${holdingsArticles.length} holdings-specific articles`);
+        
+        // Add holdings articles (deduplicate by URL)
+        for (const article of holdingsArticles) {
+          if (article.url && !urlSet.has(article.url)) {
+            urlSet.add(article.url);
+            allArticles.push({
+              ...article,
+              source: article.source?.name || article.source_name || 'Unknown',
+              source_name: article.source?.name || article.source_name || 'Unknown',
+              // Convert to database-like format for consistency
+              content: article.content || article.description || '',
+              // Default impact score for holdings articles (will be refined during personalization)
+              impact_score: 50, // Medium impact by default for holdings-specific news
+              category: 'market',
+              opportunity_type: 'neutral',
+              event_type: 'general',
+              exposure_level: 'medium',
+              searched_by: article.searchedBy || holdings.join(','),
+            });
+          }
+        }
+      } catch (error) {
+        console.error(`[v1/personalized-feed] Error fetching holdings articles:`, error.message);
+        // Continue with general articles if holdings search fails
+      }
+    }
+
+    // Step C: Get general ranked news for macro context (30% of feed, or 100% if no holdings)
+    const generalLimit = holdings.length > 0 ? Math.floor(limit * 0.3) : limit;
+    const remainingNeeded = limit - allArticles.length;
+    
+    if (remainingNeeded > 0) {
+      console.log(`[v1/personalized-feed] Fetching ${remainingNeeded} general ranked articles for macro context...`);
+      const generalArticles = getRankedForFeed({ limit: remainingNeeded, userId });
+      
+      // Add general articles (deduplicate by URL)
+      for (const article of generalArticles) {
+        if (article.url && !urlSet.has(article.url)) {
+          urlSet.add(article.url);
+          allArticles.push(article);
+        }
+      }
+      
+      console.log(`[v1/personalized-feed] Added ${generalArticles.filter(a => urlSet.has(a.url)).length} general articles`);
+    }
+
+    // Limit to requested amount
+    allArticles = allArticles.slice(0, limit);
+
+    if (allArticles.length === 0) {
+      console.log('[v1/personalized-feed] No articles found after combining holdings and general news');
+      return res.json({ items: [] });
+    }
+
+    console.log(`[v1/personalized-feed] Total articles after deduplication: ${allArticles.length} (${holdings.length > 0 ? 'holdings-focused' : 'general'})`);
+
+    // Step D: Build event objects from articles
+    // Convert to event format expected by personalization service
+    const events = allArticles.map(article => {
+      // Parse matched_holdings if available (from database articles)
       let matchedHoldings = [];
       try {
         matchedHoldings = article.matched_holdings ? JSON.parse(article.matched_holdings) : [];
       } catch (e) {
-        // Ignore parse errors
+        // If searched_by exists, use that as matched holdings
+        if (article.searched_by) {
+          matchedHoldings = article.searched_by.split(',').map(h => h.trim());
+        }
       }
 
-      // Build rawArticles array (simplified for now, could be enhanced)
+      // Build rawArticles array
       const rawArticles = [{
         articleNumber: 1,
-        source: article.source_name || 'Unknown',
+        source: article.source_name || article.source?.name || 'Unknown',
         title: article.title || '',
         description: article.description || '',
-        body: article.content ? article.content.replace(/<[^>]*>/g, '').substring(0, 1000) : '',
+        body: article.content ? article.content.replace(/<[^>]*>/g, '').substring(0, 2000) : (article.description || '').substring(0, 2000),
         url: article.url || '',
       }];
 
@@ -137,8 +207,10 @@ router.get("/personalized-feed", async (req, res) => {
         id: article.url,
         title: article.personalized_title || article.title || '',
         shortSummary: article.summary_short || article.summary_enriched || article.description || '',
-        tickerSummary: matchedHoldings.join(', ') || '',
-        impactLevel: article.impact_score >= 70 ? 'high' : article.impact_score >= 40 ? 'medium' : 'low',
+        tickerSummary: matchedHoldings.join(', ') || article.searched_by || '',
+        impactLevel: (article.impact_score !== null && article.impact_score !== undefined) 
+          ? (article.impact_score >= 70 ? 'high' : article.impact_score >= 40 ? 'medium' : 'low')
+          : 'medium', // Default to medium for holdings articles
         scopeType: article.category || 'market',
         opportunitySignal: article.opportunity_type || 'neutral',
         relevanceType: article.event_type || 'general',
@@ -147,10 +219,10 @@ router.get("/personalized-feed", async (req, res) => {
       };
     });
 
-    // Step D: Generate Rabbit explanations (batched)
+    // Step E: Generate Rabbit explanations (batched)
     const explanations = await generateRabbitExplanations(events, holdings);
 
-    // Step E: Attach explanations to events
+    // Step F: Attach explanations to events
     const personalizedItems = attachExplanations(events, explanations);
 
     console.log(`[v1/personalized-feed] Returning ${personalizedItems.length} personalized items`);
@@ -297,6 +369,108 @@ router.put("/preferences", async (req, res) => {
   } catch (error) {
     console.error("[v1/preferences] Error:", error);
     res.status(500).json({ error: "Failed to update preferences" });
+  }
+});
+
+/**
+ * GET /v1/feed/story-groups
+ * Returns clustered story groups (global + ticker-scoped)
+ *
+ * COMPOSITION LOGIC:
+ * 1. Fetch user holdings
+ * 2. Fetch GLOBAL story groups (top N, same for everyone)
+ * 3. Fetch TICKER story groups (top M per ticker in holdings)
+ * 4. Merge and deduplicate
+ * 5. Return with merged_feed sorted by impact
+ */
+router.get("/feed/story-groups", async (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+    const limitGlobal = parseInt(req.query.limit_global) || 5;
+    const limitPerTicker = parseInt(req.query.limit_per_ticker) || 3;
+    const userId = req.userId;
+
+    console.log(`[v1/feed/story-groups] Request for user ${userId}, date: ${date}`);
+
+    // Step 1: Get user holdings
+    const userHoldings = getUserHoldings(userId);
+    console.log(`[v1/feed/story-groups] User holdings: ${userHoldings.join(', ') || 'none'}`);
+
+    // Step 2: Fetch GLOBAL story groups
+    const globalGroups = getGlobalStoryGroups(date, limitGlobal);
+    console.log(`[v1/feed/story-groups] Fetched ${globalGroups.length} global groups`);
+
+    // Step 3: Fetch TICKER story groups
+    const tickerGroupsByTicker = getTickerStoryGroups(userHoldings, date, limitPerTicker);
+    console.log(`[v1/feed/story-groups] Fetched ticker groups for ${Object.keys(tickerGroupsByTicker).length} tickers`);
+
+    // Step 4: Merge into merged_feed, deduplicating by group_title
+    const mergedFeed = [];
+    const seenTitles = new Set();
+
+    // Add global groups first (they apply to everyone)
+    for (const group of globalGroups) {
+      if (!seenTitles.has(group.group_title)) {
+        mergedFeed.push({
+          ...group,
+          rank_reason: "Global impact"
+        });
+        seenTitles.add(group.group_title);
+      }
+    }
+
+    // Add ticker groups (in order of impact level)
+    for (const ticker of userHoldings) {
+      const tickerGroups = tickerGroupsByTicker[ticker] || [];
+      for (const group of tickerGroups) {
+        if (!seenTitles.has(group.group_title)) {
+          mergedFeed.push({
+            ...group,
+            rank_reason: `User holds ${ticker}`
+          });
+          seenTitles.add(group.group_title);
+        }
+      }
+    }
+
+    // Sort by impact level (High > Moderate > Low > Very Low)
+    const impactOrder = { 'High': 0, 'Moderate': 1, 'Low': 2, 'Very Low': 3 };
+    mergedFeed.sort((a, b) => {
+      const impactDiff = (impactOrder[a.impact_level] || 999) - (impactOrder[b.impact_level] || 999);
+      if (impactDiff !== 0) return impactDiff;
+      // Secondary sort by created_at DESC
+      return new Date(b.created_at) - new Date(a.created_at);
+    });
+
+    // Step 5: Build response
+    const response = {
+      date,
+      user_id: userId,
+      user_holdings: userHoldings,
+      generated_at: new Date().toISOString(),
+
+      global: globalGroups,
+
+      by_ticker: tickerGroupsByTicker,
+
+      merged_feed: mergedFeed,
+
+      metadata: {
+        total_groups: globalGroups.length + Object.values(tickerGroupsByTicker).reduce((sum, arr) => sum + arr.length, 0),
+        total_articles_clustered: globalGroups.reduce((sum, g) => sum + g.article_count, 0) +
+                                   Object.values(tickerGroupsByTicker)
+                                     .reduce((sum, groups) => sum + groups.reduce((s, g) => s + g.article_count, 0), 0),
+        dedup_removed: globalGroups.length + Object.values(tickerGroupsByTicker).reduce((sum, arr) => sum + arr.length, 0) - mergedFeed.length,
+        cache_ttl_seconds: 3600
+      }
+    };
+
+    console.log(`[v1/feed/story-groups] Returning ${mergedFeed.length} groups (${response.metadata.total_articles_clustered} articles)`);
+    res.json(response);
+
+  } catch (error) {
+    console.error("[v1/feed/story-groups] Error:", error);
+    res.status(500).json({ error: "Failed to fetch story groups" });
   }
 });
 

@@ -14,7 +14,11 @@ const { updateFinalInterpretation } = require("../data/articleStorage");
  * - shown_to_user
  * - shown_timestamp (once shown)
  */
-async function processRankingClustering(articles, cutoffScore = 50) {
+async function processRankingClustering(articles, cutoffScore = null) {
+  const scoring = require("../config/scoring");
+  if (cutoffScore === null) {
+    cutoffScore = scoring.FEED_RANK_THRESHOLD;
+  }
   console.log("\n[Stage 5] ========== RANKING & CLUSTERING STARTED ==========");
   console.log(`[Stage 5] Cutoff score: ${cutoffScore}`);
   
@@ -24,8 +28,8 @@ async function processRankingClustering(articles, cutoffScore = 50) {
     // Get all personalized articles (status = "personalized") - explicitly exclude discarded
     console.log("[Stage 5] Step 1: Fetching personalized articles...");
     const personalizedArticles = db.prepare(`
-      SELECT url, title, personalized_title, profile_adjusted_score, impact_score,
-             published_at, event_type, matched_tickers, matched_holdings
+      SELECT url, title, profile_adjusted_score, impact_score,
+             published_at, event_type, matched_tickers
       FROM articles
       WHERE status = 'personalized'
         AND status != 'discarded'
@@ -65,20 +69,20 @@ async function processRankingClustering(articles, cutoffScore = 50) {
       )[0];
 
       // Generate cluster_id
-      const cluster_id = generateClusterId(primary.title || primary.personalized_title);
+      const cluster_id = generateClusterId(primary.title);
 
       // Calculate final_rank_score
       const final_rank_score = calculateFinalRankScore(primary);
-      
+
       if (i < 5 || cluster.length > 1) {
-        console.log(`[Stage 5] Cluster ${i + 1}/${clusters.length}: ${cluster.length} articles, primary: "${(primary.title || primary.personalized_title || "").substring(0, 60)}...", final_rank_score: ${final_rank_score}`);
+        console.log(`[Stage 5] Cluster ${i + 1}/${clusters.length}: ${cluster.length} articles, primary: "${(primary.title || "").substring(0, 60)}...", final_rank_score: ${final_rank_score}`);
       }
 
       // Build Signal object for primary article to apply guardrails
       const primaryRow = db.prepare("SELECT * FROM articles WHERE url = ?").get(primary.url);
       let signalData = {
         url: primary.url,
-        title: primaryRow?.personalized_title || primaryRow?.title || "",
+        title: primaryRow?.title || "",
         verdict: primaryRow?.verdict || "aware",
         why: primaryRow?.why_json ? JSON.parse(primaryRow.why_json) : [],
         action: primaryRow?.action || "Do nothing",
@@ -233,7 +237,7 @@ function createClusters(articles) {
       processed.add(article.url);
 
       // Find similar articles within the same group
-      const title1 = (article.personalized_title || article.title || "").toLowerCase();
+      const title1 = (article.title || "").toLowerCase();
       const tickers1 = article.matched_tickers ? JSON.parse(article.matched_tickers) : [];
       const eventType1 = article.event_type || "";
 
@@ -241,7 +245,7 @@ function createClusters(articles) {
         if (processed.has(other.url)) continue;
         if (article.url === other.url) continue;
 
-        const title2 = (other.personalized_title || other.title || "").toLowerCase();
+        const title2 = (other.title || "").toLowerCase();
         const tickers2 = other.matched_tickers ? JSON.parse(other.matched_tickers) : [];
         const eventType2 = other.event_type || "";
 

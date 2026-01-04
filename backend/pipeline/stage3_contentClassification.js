@@ -1,5 +1,6 @@
 const OpenAI = require("openai");
 const { getDatabase } = require("../data/db");
+const scoring = require("../config/scoring");
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -22,6 +23,8 @@ const openai = new OpenAI({
  * - matched_holdings (based on user's list)
  * - status = "llm_processed"
  */
+
+
 async function processContentClassification(article, userHoldings = []) {
   const db = getDatabase();
 
@@ -65,26 +68,25 @@ async function processContentClassification(article, userHoldings = []) {
     return { status: "no_content" };
   }
 
-  // GUARDRAIL 5B: Require status = 'content_fetched' and content_length >= 400
-  if (articleRow.status !== "content_fetched") {
-    console.log(`[Stage 3] Skipping ${article.url} - status is ${articleRow.status}, not 'content_fetched'`);
-    return { status: "skipped", reason: `Status is ${articleRow.status}, not 'content_fetched'` };
-  }
+    // GUARDRAIL 5B: Require status = 'content_fetched' and content_length >= threshold
+    if (articleRow.status !== "content_fetched") {
+      console.log(`[Stage 3] Skipping ${article.url} - status is ${articleRow.status}, not 'content_fetched'`);
+      return { status: "skipped", reason: `Status is ${articleRow.status}, not 'content_fetched'` };
+    }
 
-  const MIN_CONTENT_LENGTH = 400;
-  const contentLength = articleRow.content_length || articleRow.clean_text.length;
-  if (contentLength < MIN_CONTENT_LENGTH) {
-    console.log(`[Stage 3] Skipping ${article.url} - content_length ${contentLength} < ${MIN_CONTENT_LENGTH}`);
-    // Mark as discarded
-    db.prepare(`
-      UPDATE articles SET
-        impact_score = 0,
-        status = 'discarded',
-        updated_at = datetime('now')
-      WHERE url = ?
-    `).run(article.url);
-    return { status: "discarded", reason: `Content too short: ${contentLength} < ${MIN_CONTENT_LENGTH}` };
-  }
+    const contentLength = articleRow.content_length || articleRow.clean_text.length;
+    if (contentLength < scoring.CONTENT_MIN_LENGTH) {
+      console.log(`[Stage 3] Skipping ${article.url} - content_length ${contentLength} < ${scoring.CONTENT_MIN_LENGTH}`);
+      // Mark as discarded
+      db.prepare(`
+        UPDATE articles SET
+          impact_score = 0,
+          status = 'discarded',
+          updated_at = datetime('now')
+        WHERE url = ?
+      `).run(article.url);
+      return { status: "discarded", reason: `Content too short: ${contentLength} < ${scoring.CONTENT_MIN_LENGTH}` };
+    }
 
   // Stage 3 is fully global and user-agnostic
   // It only identifies which tickers/sectors are mentioned (used later for scoring in Stage 4)
@@ -103,7 +105,12 @@ Analyze the article and provide:
 6. Opportunity score (0-100): Potential upside opportunity
 7. Volatility score (0-100): How much volatility might this cause?
 8. Matched tickers: Stock tickers mentioned (JSON array)
+   - LLM instruction: Extract ticker symbols that appear as standalone tokens OR are clearly referenced as a company's traded symbol
+   - LLM instruction: Do NOT extract tickers that are substrings of common words (e.g., "AAPL" in "application")
+   - LLM instruction: Only extract tickers that appear as standalone tokens OR are clearly referenced as a company's traded symbol
+   - Note: This is LLM-based extraction with evidence snippets, not regex word-boundary matching
 9. Matched sectors: Industry sectors mentioned (JSON array)
+10. Ticker evidence (optional): Mapping each ticker to a brief snippet (max 160 characters) showing how it appears
 
 Always respond with valid JSON in this exact format:
 {
@@ -115,7 +122,8 @@ Always respond with valid JSON in this exact format:
   "opportunity_score": 0-100,
   "volatility_score": 0-100,
   "matched_tickers": ["TICKER1", "TICKER2"],
-  "matched_sectors": ["sector1", "sector2"]
+  "matched_sectors": ["sector1", "sector2"],
+  "ticker_evidence": {"TICKER1": "snippet showing how ticker appears", "TICKER2": "..."}
 }`;
 
     // Add search context if available
@@ -124,10 +132,15 @@ Always respond with valid JSON in this exact format:
       : "";
 
     // User prompt - Stage 3 is global and user-agnostic
+    // Individual processing: uses full article (8000 chars) for higher accuracy
+    // Batch processing: uses intro+conclusion excerpt (1800 chars) to control cost
+    // Both produce the same output schema (impact_score, matched_tickers, etc.)
+    const scoring = require("../config/scoring");
+    const maxChars = scoring.STAGE3_PASS2_INDIVIDUAL_MAX_CHARS;
     const userPrompt = `Article Title: ${articleRow.title}
 
 Article Content:
-${articleRow.clean_text.substring(0, 8000)}${articleRow.clean_text.length > 8000 ? "..." : ""}${searchContext}
+${articleRow.clean_text.substring(0, maxChars)}${articleRow.clean_text.length > maxChars ? "..." : ""}${searchContext}
 
 Analyze this article and provide detailed classification including:
 - Event type and impact${articleRow.searched_by ? ` (especially for ${articleRow.searched_by})` : ""}
@@ -181,16 +194,16 @@ Return ONLY valid JSON, no markdown formatting.`;
 
     // Stage 3 is global and user-agnostic - it only identifies tickers/sectors mentioned
     // Holdings matching happens in Stage 4 (personalization)
-    const matched_holdings = "[]";
 
     // Determine status based on impact_score
+    // MVP: Lowered threshold from 20 to 15 for low-volume scenarios
+    // Note: Low impact articles are NOT discarded here - they proceed to Stage 4
+    // Only truly irrelevant articles (impact_score < 15) are discarded
     let status;
-    if (impact_score >= 40) {
-      status = "llm_processed"; // Move to Stage 4
-    } else if (impact_score >= 20 && impact_score < 40) {
-      status = "llm_processed"; // Maybe useful, move to Stage 4
+    if (impact_score >= 15) {
+      status = "llm_processed"; // Proceed to Stage 4
     } else {
-      status = "discarded"; // Low impact, discard
+      status = "discarded"; // Very low impact, discard
     }
 
     // Update database
@@ -205,7 +218,7 @@ Return ONLY valid JSON, no markdown formatting.`;
         volatility_score = ?,
         matched_tickers = ?,
         matched_sectors = ?,
-        matched_holdings = ?,
+        ticker_evidence = ?,
         llm_attempts = llm_attempts + 1,
         status = ?,
         processing_completed_at = datetime('now'),
@@ -221,7 +234,7 @@ Return ONLY valid JSON, no markdown formatting.`;
       volatility_score,
       matched_tickers,
       matched_sectors,
-      matched_holdings,
+      ticker_evidence_json,
       status,
       article.url
     );
@@ -236,7 +249,6 @@ Return ONLY valid JSON, no markdown formatting.`;
       volatility_score,
       matched_tickers: JSON.parse(matched_tickers),
       matched_sectors: JSON.parse(matched_sectors),
-      matched_holdings: JSON.parse(matched_holdings),
       status,
     };
   } catch (error) {
@@ -339,7 +351,7 @@ async function processContentClassificationPass1(articles, userHoldings = []) {
   // Build quick classifier prompt (much shorter, cheaper)
   const articlesList = articles.map((article, index) => {
     const articleRow = db.prepare(`
-      SELECT title, clean_text, searched_by FROM articles WHERE url = ?
+      SELECT title, clean_text, searched_by, title_relevance FROM articles WHERE url = ?
     `).get(article.url);
     
     if (!articleRow) return null;
@@ -384,7 +396,7 @@ Only mark maybe_relevant=true for medium/high buckets.`;
       ],
       temperature: 0.2,
       response_format: { type: "json_object" },
-      max_tokens: Math.min(2000, articles.length * 100), // Much cheaper than full analysis
+      max_tokens: Math.min(scoring.STAGE3_PASS1_MAX_TOKENS, articles.length * 100), // Much cheaper than full analysis
     });
     
     const content = response.choices[0].message.content;
@@ -439,14 +451,13 @@ async function processContentClassificationBatch(articles, userHoldings = []) {
       continue; // Skip if no content
     }
     
-    // GUARDRAIL 5B: Require status = 'content_fetched' and content_length >= 400
+    // GUARDRAIL 5B: Require status = 'content_fetched' and content_length >= threshold
     if (existing.status !== "content_fetched") {
       continue; // Skip if not in correct status
     }
     
-    const MIN_CONTENT_LENGTH = 400;
     const contentLength = existing.content_length || existing.clean_text.length;
-    if (contentLength < MIN_CONTENT_LENGTH) {
+    if (contentLength < scoring.CONTENT_MIN_LENGTH) {
       // Mark as discarded
       db.prepare(`
         UPDATE articles SET
@@ -459,7 +470,7 @@ async function processContentClassificationBatch(articles, userHoldings = []) {
     }
     
     const articleRow = db.prepare(`
-      SELECT title, clean_text, title_ticker_matches, title_sector_matches, searched_by, status, content_length
+      SELECT title, clean_text, title_ticker_matches, title_sector_matches, searched_by, title_relevance, status, content_length
       FROM articles WHERE url = ?
     `).get(article.url);
     
@@ -503,15 +514,30 @@ async function processContentClassificationBatch(articles, userHoldings = []) {
     );
     
     // Filter: Only process medium/high bucket articles in Pass 2 (full analysis)
+    // MVP: Force high-relevance holdings articles to Pass 2 even if Pass 1 says "low"
     articlesForPass2 = [];
     pass1Dropped = [];
-    
+
     for (let i = 0; i < preFiltered.length; i++) {
       const item = preFiltered[i];
       const pass1Result = pass1Results[i];
-      
-      if (!pass1Result.maybe_relevant || pass1Result.bucket === "low") {
-        // Drop low bucket articles without full analysis
+
+      // MVP: Force Pass 2 for holdings articles that passed Stage 1 (title_relevance >= 1)
+      // This ensures articles that were deemed worth fetching in Stage 1 get full LLM analysis
+      const titleRelevance = item.data.title_relevance || 0;
+      const searchedBy = item.data.searched_by || "";
+      const isHoldingsArticle = titleRelevance >= 1 && searchedBy !== "MACRO" && searchedBy !== "RSS";
+
+      // Debug logging
+      if (pass1Result.bucket === "low" && titleRelevance > 0) {
+        console.log(`[Stage 3] Article with low bucket: title_relevance=${titleRelevance}, searched_by="${searchedBy}", isHoldingsArticle=${isHoldingsArticle}, url=${item.article.url.substring(0, 60)}`);
+      }
+      if (isHoldingsArticle && (pass1Result.bucket === "low" || !pass1Result.maybe_relevant)) {
+        console.log(`[Stage 3] FORCE Pass 2 for holdings article: ${item.article.url.substring(0, 60)} (title_relevance=${titleRelevance}, searched_by=${searchedBy})`);
+      }
+
+      if ((!pass1Result.maybe_relevant || pass1Result.bucket === "low") && !isHoldingsArticle) {
+        // Defer low bucket articles (don't permanently discard)
         pass1Dropped.push({
           article: item.article,
           data: item.data,
@@ -522,34 +548,36 @@ async function processContentClassificationBatch(articles, userHoldings = []) {
       }
     }
     
-    // Save Pass 1 dropped articles
+    // Save Pass 1 deferred articles (status = 'deferred_low', not 'discarded')
     if (pass1Dropped.length > 0) {
-      const dropStmt = db.prepare(`
+      const deferStmt = db.prepare(`
         UPDATE articles SET
           impact_score = 15,
           event_type = 'other',
-          status = 'discarded',
+          status = 'deferred_low',
+          deferred_reason = ?,
+          deferred_at = datetime('now'),
           updated_at = datetime('now')
         WHERE url = ?
       `);
-      const dropTransaction = db.transaction((dropped) => {
-        for (const item of dropped) {
-          dropStmt.run(item.article.url);
+      const deferTransaction = db.transaction((deferred) => {
+        for (const item of deferred) {
+          deferStmt.run(item.reason, item.article.url);
         }
       });
-      dropTransaction(pass1Dropped);
-      console.log(`[Stage 3 Batch] Pass 1 dropped ${pass1Dropped.length} articles (low bucket), ${articlesForPass2.length} proceed to Pass 2`);
+      deferTransaction(pass1Dropped);
+      console.log(`[Stage 3 Batch] Pass 1 deferred ${pass1Dropped.length} articles (low bucket), ${articlesForPass2.length} proceed to Pass 2`);
     }
     
     if (articlesForPass2.length === 0) {
-      // All articles dropped in Pass 1 - map results back to original order
+      // All articles deferred in Pass 1 - map results back to original order
       const resultMap = new Map();
       for (const item of pass1Dropped) {
         resultMap.set(item.article.url, {
           impact_score: 15,
           event_type: "other",
-          status: "discarded",
-          pass1Dropped: true,
+          status: "deferred_low",
+          pass1Deferred: true,
         });
       }
       // Map back to original article order
@@ -559,10 +587,15 @@ async function processContentClassificationBatch(articles, userHoldings = []) {
     // Pass 2: Full analysis only on medium/high bucket articles
     console.log(`[Stage 3 Batch] Pass 2: Full analysis for ${articlesForPass2.length} articles`);
     
-    // Build batch prompt with optimized text extraction (intro + conclusion, max 1800 chars)
+    // Build batch prompt with optimized text extraction (intro + conclusion excerpt)
+    // Individual processing: uses full article (8000 chars) for higher accuracy
+    // Batch processing: uses intro+conclusion excerpt (1800 chars) to control cost
+    // Both produce the same output schema (impact_score, matched_tickers, etc.)
+    const scoring = require("../config/scoring");
+    const batchMaxChars = scoring.STAGE3_PASS2_BATCH_MAX_CHARS;
     const articlesList = articlesForPass2.map((item, index) => {
       const { article, data } = item;
-      const content = extractRelevantText(data.clean_text, 1800); // Reduced from 3000 to 1800
+      const content = extractRelevantText(data.clean_text, batchMaxChars);
       const searchContext = data.searched_by ? ` (Found by searching for: ${data.searched_by})` : "";
       return `Article ${index + 1} (URL: ${article.url}):
 Title: ${data.title}
@@ -579,6 +612,7 @@ Analyze each article and provide for EACH one:
 6. Opportunity score (0-100): Potential upside opportunity
 7. Volatility score (0-100): How much volatility might this cause?
 8. Matched tickers: Stock tickers mentioned (JSON array)
+   - LLM instruction: Extract standalone tickers (not substrings), backed by evidence snippets
 9. Matched sectors: Industry sectors mentioned (JSON array)
 
 Return a JSON object where keys are article URLs and values are the analysis:
@@ -613,7 +647,7 @@ Return a JSON object with analysis for each article URL.`;
       ],
       temperature: 0.3,
       response_format: { type: "json_object" },
-      max_tokens: Math.min(6000, articlesForPass2.length * 600), // Scale with batch size (increased for larger batches)
+      max_tokens: Math.min(6000, articlesForPass2.length * 600), // Scale with batch size
     });
     
     // Parse and process results (similar to individual processing)
@@ -635,15 +669,15 @@ Return a JSON object with analysis for each article URL.`;
     // Create a map to track which articles were processed and their results
     const resultMap = new Map();
     
-    // Mark Pass 1 dropped articles
-    for (const item of pass1Dropped) {
-      resultMap.set(item.article.url, {
-        impact_score: 15,
-        event_type: "other",
-        status: "discarded",
-        pass1Dropped: true,
-      });
-    }
+      // Mark Pass 1 deferred articles
+      for (const item of pass1Dropped) {
+        resultMap.set(item.article.url, {
+          impact_score: 15,
+          event_type: "other",
+          status: "deferred_low",
+          pass1Deferred: true,
+        });
+      }
     
     // Process Pass 2 results (full analysis)
     for (const item of articlesForPass2) {
@@ -674,18 +708,33 @@ Return a JSON object with analysis for each article URL.`;
       
       // Stage 3 is global and user-agnostic - it only identifies tickers/sectors mentioned
       // Holdings matching happens in Stage 4 (personalization)
-      const matched_holdings = "[]";
-      
-      // Determine status
-      let status;
-      if (impact_score >= 40) {
-        status = "llm_processed";
-      } else if (impact_score >= 20 && impact_score < 40) {
-        status = "llm_processed";
-      } else {
-        status = "discarded";
+
+      // Store ticker evidence conditionally
+      const ticker_evidence = classificationData.ticker_evidence || {};
+      const shouldStoreEvidence = impact_score >= scoring.TICKER_EVIDENCE_STORE_THRESHOLD ||
+                                 process.env.DEBUG_MODE === 'true';
+
+      let ticker_evidence_json = null;
+      if (shouldStoreEvidence && Object.keys(ticker_evidence).length > 0) {
+        // Cap each snippet to 160 chars
+        const cappedEvidence = {};
+        for (const [ticker, snippet] of Object.entries(ticker_evidence)) {
+          cappedEvidence[ticker] = String(snippet).substring(0, 160);
+        }
+        ticker_evidence_json = JSON.stringify(cappedEvidence);
       }
-      
+
+      // Determine status
+      // MVP: Lowered threshold from 20 to 15 for low-volume scenarios
+      // Note: Low impact articles are NOT discarded here - they proceed to Stage 4
+      // Only truly irrelevant articles (impact_score < 15) are discarded
+      let status;
+      if (impact_score >= 15) {
+        status = "llm_processed"; // Proceed to Stage 4
+      } else {
+        status = "discarded"; // Very low impact, discard
+      }
+
       // Update database
       db.prepare(`
         UPDATE articles SET
@@ -698,7 +747,7 @@ Return a JSON object with analysis for each article URL.`;
           volatility_score = ?,
           matched_tickers = ?,
           matched_sectors = ?,
-          matched_holdings = ?,
+          ticker_evidence = ?,
           llm_attempts = llm_attempts + 1,
           status = ?,
           processing_completed_at = datetime('now'),
@@ -714,11 +763,11 @@ Return a JSON object with analysis for each article URL.`;
         volatility_score,
         matched_tickers,
         matched_sectors,
-        matched_holdings,
+        ticker_evidence_json,
         status,
         article.url
       );
-      
+
       resultMap.set(article.url, {
         event_type,
         impact_score,
@@ -729,7 +778,6 @@ Return a JSON object with analysis for each article URL.`;
         volatility_score,
         matched_tickers: JSON.parse(matched_tickers),
         matched_sectors: JSON.parse(matched_sectors),
-        matched_holdings: JSON.parse(matched_holdings),
         status,
       });
     }
@@ -761,8 +809,125 @@ Return a JSON object with analysis for each article URL.`;
   }
 }
 
+/**
+ * Pass 1 classifier (lightweight) - exported for re-evaluation
+ */
+async function processContentClassificationPass1(articles, userHoldings = []) {
+  // Reuse the Pass 1 logic from batch processing
+  if (!articles || articles.length === 0) return [];
+  
+  const db = getDatabase();
+  
+  // Pre-filter: Get existing data and filter
+  const preFiltered = [];
+  for (const article of articles) {
+    const existing = db.prepare(`
+      SELECT url, clean_text, content_length, status, searched_by
+      FROM articles WHERE url = ?
+    `).get(article.url);
+    
+    if (!existing) continue;
+    
+    // GUARDRAIL 5B: Require status = 'content_fetched' and content_length >= threshold
+    if (existing.status !== "content_fetched") {
+      continue;
+    }
+    
+    const contentLength = existing.content_length || existing.clean_text.length;
+    if (contentLength < scoring.CONTENT_MIN_LENGTH) {
+      continue;
+    }
+    
+    preFiltered.push({
+      article,
+      data: {
+        clean_text: existing.clean_text,
+        searched_by: existing.searched_by,
+        title: article.title,
+      },
+    });
+  }
+  
+  if (preFiltered.length === 0) {
+    return articles.map(() => ({ maybe_relevant: false, bucket: "low" }));
+  }
+  
+  // Build Pass 1 prompt
+  const articlesList = preFiltered.map((item, index) => {
+    const { article, data } = item;
+    const content = extractRelevantText(data.clean_text || "", 800);
+    const searchContext = data.searched_by ? ` (Found by searching for: ${data.searched_by})` : "";
+    return `Article ${index + 1} (URL: ${article.url}):
+Title: ${data.title}
+Content: ${content}${searchContext}`;
+  }).join("\n\n---\n\n");
+  
+  const systemPrompt = `You are a financial news classifier. Quickly classify articles into impact buckets.
+
+Buckets:
+- "high": Clearly material events (earnings beats/misses, M&A, major guidance changes, regulatory decisions)
+- "medium": Significant news (partnerships, product updates, industry trends)
+- "low": Minor updates, opinion pieces, low-value content
+
+Only mark maybe_relevant=true for medium/high buckets.`;
+  
+  const userPrompt = `Quickly classify these ${preFiltered.length} articles:\n\n${articlesList}\n\nReturn JSON with results array.`;
+  
+  try {
+    const response = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      max_tokens: Math.min(scoring.STAGE3_PASS1_MAX_TOKENS, preFiltered.length * 100),
+    });
+    
+    const content = response.choices[0].message.content;
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    let classificationData;
+    
+    if (jsonMatch) {
+      classificationData = JSON.parse(jsonMatch[0]);
+    } else {
+      throw new Error("Invalid JSON response from LLM");
+    }
+    
+    // Map results back to original articles
+    const results = [];
+    const pass1Results = Array.isArray(classificationData.results) 
+      ? classificationData.results 
+      : Object.values(classificationData);
+    
+    let resultIndex = 0;
+    for (let i = 0; i < articles.length; i++) {
+      const article = articles[i];
+      const preFilteredIndex = preFiltered.findIndex(item => item.article.url === article.url);
+      
+      if (preFilteredIndex >= 0 && resultIndex < pass1Results.length) {
+        const pass1Result = pass1Results[resultIndex++];
+        results.push({
+          maybe_relevant: pass1Result.maybe_relevant || false,
+          bucket: pass1Result.bucket || "low",
+        });
+      } else {
+        results.push({ maybe_relevant: false, bucket: "low" });
+      }
+    }
+    
+    return results;
+  } catch (error) {
+    console.error(`[Stage 3 Pass 1] Error:`, error.message);
+    // Return default results on error
+    return articles.map(() => ({ maybe_relevant: false, bucket: "low" }));
+  }
+}
+
 module.exports = {
   processContentClassification,
   processContentClassificationBatch,
+  processContentClassificationPass1,
 };
 
